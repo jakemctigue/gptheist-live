@@ -71,10 +71,10 @@ async function main(args: string[]): Promise<void> {
       return index >= 0 ? args[index + 1] : undefined;
     };
     const host = option("--host") ?? "127.0.0.1";
-    const portText = option("--port") ?? "4173";
+    const portText = option("--port") ?? process.env.PORT ?? "4173";
     const port = Number(portText);
     if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535");
-    const rpcUrl = process.env.RPC_URL;
+    const rpcUrl = process.env.ROBINHOOD_RPC_URL ?? process.env.RPC_URL;
     const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl } : { host, port });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;

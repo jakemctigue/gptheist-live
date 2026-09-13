@@ -246,7 +246,7 @@ export async function writeJsonlLog(result: SimulationResult, directory = "runs"
     try {
       const stats = await handle.stat();
       if (!stats.isFile()) throw new Error("Existing audit log must be a regular file");
-      if (await realpath(path) !== path) throw new Error("Audit log path must remain inside the audit directory");
+      if (await realpath(path) !== path) throw new Error("Audit log path must not be a symlink and must remain inside the audit directory");
       existing = await handle.readFile({ encoding: "utf8" });
     } finally {
       await handle.close();

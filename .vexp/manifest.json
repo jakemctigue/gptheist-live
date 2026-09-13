@@ -1,0 +1,44 @@
+{
+  "file_hashes": {
+    ".codex/vexp-hint.sh": "cc311974e8a511ab51aff7ccc5bd034e6356398f3fba68db41dfd67bc1cda0a7",
+    "AGENTS.md": "22e1fb3bad6d52215258df79aec33b252167f94afcec3201ef67b5aa6ae71ae8",
+    "README.md": "0a32c9d76f1aaab61961507eb99c35909d629cf662595f753ae80f5308835906",
+    "SECURITY.md": "d911941d0918b43eff56c6b367db9b38fbb639cac60b72e41a32c5aba5a79dd6",
+    "assets/desk/desk.css": "3ac24ca503c58f5564c0dc9b29a9752146e517f955021a74efc290da2bde19c5",
+    "assets/desk/desk.js": "35a2a52536eb3ccdea4d5da9695231e58b73af966706a433fe57d0ae29d20a41",
+    "assets/desk/rooms.js": "e161edcd5fd7c76d062898f494214b399f075b926796316da873cfc3cf8aa900",
+    "docs/AGENTS.md": "107625316d86a7efb2b845a3725d35f534ada7d5a6fdbc99cd1330be88e644ca",
+    "src/cli.ts": "3abc13258f8a6fd68548c2b0d951497d0708d2b60e1bb5603fd8abf78f6c13ea",
+    "src/live.ts": "0e6d65cf483447e79356340f3b46300d543109ef26f252997e44f7a21510f69f",
+    "src/market.ts": "7dc2ec71b865dfa93d412fb482fe824e86a4832ea34e8ff643320e4bc192f559",
+    "src/server.ts": "3b15c23c6e32888ac90841dd52a09195ebfee81b64dcecc9104107adf38cb4d3",
+    "src/simulation.ts": "54224cb6f9a7878d0cb95e7a5b01d18651f376734968bb36dcc4e6c6e6055c82",
+    "tests/cli.test.ts": "968fc7f6f52a32441afd3b7184d2e448a74db1c18b2241d0e2e8c121896f30e8",
+    "tests/live.test.ts": "3161da694252831dbc91e030bd5bafae5ee1f6fc89e4dce83a47ad285271b9f2",
+    "tests/server.test.ts": "2f58df1de7752f73e40d25a13bb0d80456c8cb83b8e916b4a58b0ba9278ff7fb",
+    "tests/simulation.test.ts": "eeda2af23bbca3927f9e2be8c63910c6c66896a3f1f393b7551d7718f2a40663"
+  },
+  "indexed_at_commit": "2ad2e47b798341df4584edd68a6998e8c07c0618",
+  "indexed_at_timestamp": "2026-09-13T21:04:12.807136300+00:00",
+  "languages": {
+    "javascript": {
+      "calls": 33,
+      "nodes": 30
+    },
+    "markdown": {
+      "calls": 0,
+      "nodes": 31
+    },
+    "typescript": {
+      "calls": 62,
+      "nodes": 72
+    }
+  },
+  "schema_version": 3,
+  "stats": {
+    "total_edges": 140,
+    "total_files": 17,
+    "total_nodes": 133
+  },
+  "vexp_version": "3.1.3"
+}

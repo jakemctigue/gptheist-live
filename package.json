@@ -5,11 +5,11 @@
   "author": "immortalhowwl",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/immortalhowwl/gptheist.git"
+    "url": "git+https://github.com/jakemctigue/gptheist-live.git"
   },
-  "homepage": "https://github.com/immortalhowwl/gptheist#readme",
+  "homepage": "https://github.com/jakemctigue/gptheist-live#readme",
   "bugs": {
-    "url": "https://github.com/immortalhowwl/gptheist/issues"
+    "url": "https://github.com/jakemctigue/gptheist-live/issues"
   },
   "keywords": [
     "multi-agent",
@@ -34,7 +34,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/src/cli.js desk --host 0.0.0.0 --port ${PORT:-4173}",
+    "start": "node dist/src/cli.js desk --host 0.0.0.0",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "demo": "npm run build --silent && node dist/src/cli.js demo",
     "desk": "npm run build --silent && node dist/src/cli.js desk",
@@ -48,6 +48,6 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
-    "viem": "^2.56.3"
+    "viem": "^2.56.5"
   }
 }

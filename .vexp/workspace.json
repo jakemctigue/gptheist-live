@@ -1,0 +1,13 @@
+{
+  "name": "jake-code-projects",
+  "repos": [
+    {
+      "alias": "bossforge",
+      "path": "../../bossforge.dev"
+    },
+    {
+      "alias": "foundry",
+      "path": "../../foundry-mcp-server"
+    }
+  ]
+}

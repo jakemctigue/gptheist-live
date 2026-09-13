@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/immortalhowwl/gptheist/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/immortalhowwl/gptheist/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/jakemctigue/gptheist-live/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/jakemctigue/gptheist-live/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="mode" src="https://img.shields.io/badge/mode-paper--only-e5484d">
   <img alt="runtime dependencies" src="https://img.shields.io/badge/runtime%20dependencies-viem-f4efe6">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-f4efe6">
@@ -29,8 +29,8 @@ The live Desk reads public chain data only. It has **no wallet connection, priva
 Requires Node.js 18 or newer.
 
 ```bash
-git clone https://github.com/immortalhowwl/gptheist.git
-cd gptheist
+git clone https://github.com/jakemctigue/gptheist-live.git
+cd gptheist-live
 npm install
 npm run desk
 ```
@@ -75,6 +75,23 @@ Audit: runs/b8d3603a21d62139.jsonl
 | `node dist/src/cli.js agents` | Lists all ten roles and boundaries |
 | `node dist/src/cli.js doctor` | Checks Node, fixture access, logs, dependencies, and execution mode |
 | `npm test` | Builds and runs the complete test suite |
+
+## Production deployment
+
+The included `railway.json` builds the TypeScript project, starts the Desk on Railway's assigned `PORT`, and checks `/health`. Deploy the repository from the Railway dashboard or CLI after setting a production RPC endpoint:
+
+```bash
+railway variables set ROBINHOOD_RPC_URL="https://your-robinhood-chain-rpc.example"
+railway up
+```
+
+`ROBINHOOD_RPC_URL` may contain a comma-separated fallback list. Append `#nologs` to an endpoint that supports ordinary reads but does not support `eth_getLogs`:
+
+```text
+https://read-rpc.example#nologs,https://archive-rpc.example
+```
+
+The live snapshot scans up to 25,000 recent blocks, so the production endpoint must support historical `eth_getLogs` requests. `RPC_URL` remains supported as a compatibility alias. With neither variable set, the app uses public Robinhood Chain endpoints suitable for local evaluation and light traffic.
 
 After `npm link`, use the shorter binary form:
 

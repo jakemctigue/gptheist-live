@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"C:/Users/Jake/gptheist-live/gptheist-live/.codex/vexp-hint.sh\"",
+            "commandWindows": "\"C:\\Users\\Jake\\gptheist-live\\gptheist-live\\.codex\\vexp-hint.cmd\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
