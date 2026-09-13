@@ -18,8 +18,8 @@
     "tests/server.test.ts": "2f58df1de7752f73e40d25a13bb0d80456c8cb83b8e916b4a58b0ba9278ff7fb",
     "tests/simulation.test.ts": "eeda2af23bbca3927f9e2be8c63910c6c66896a3f1f393b7551d7718f2a40663"
   },
-  "indexed_at_commit": "2ad2e47b798341df4584edd68a6998e8c07c0618",
-  "indexed_at_timestamp": "2026-09-13T21:04:12.807136300+00:00",
+  "indexed_at_commit": "ce4995ca30c6006dbd8e334819a329e7fe415593",
+  "indexed_at_timestamp": "2026-09-13T21:14:02.830891600+00:00",
   "languages": {
     "javascript": {
       "calls": 33,
