@@ -1,8 +1,10 @@
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_RPC_URL, ROBINHOOD_CHAIN_ID, fetchLiveSnapshot, type LiveSnapshot, type RpcCaller } from "./live.js";
+import { fetchDeployerHistory, resolveHistoryRange, type DeployerHistory, type HistoryRange } from "./history.js";
+import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv, type TradePolicy, type TradeRequest } from "./trading.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
@@ -21,6 +23,8 @@ export interface DeskServerOptions {
   cacheMs?: number;
   failureCacheMs?: number;
   socialFetch?: typeof fetch;
+  tradePolicy?: TradePolicy;
+  historyCacheMs?: number;
 }
 
 export interface RpcCallerOptions {
@@ -92,13 +96,38 @@ function send(response: ServerResponse, status: number, type: string, body: stri
   response.end(body);
 }
 
+async function readJsonBody(request: IncomingMessage, maximumBytes = 8_192): Promise<unknown> {
+  if (!(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+    throw new TradeGateError("CONTENT_TYPE", "content-type must be application/json", 415);
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maximumBytes) throw new TradeGateError("BODY_TOO_LARGE", "request body exceeds 8192 bytes", 413);
+    chunks.push(buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } catch {
+    throw new TradeGateError("INVALID_JSON", "request body must be valid JSON", 400);
+  }
+}
+
 export function createDeskServer(options: DeskServerOptions = {}): Server {
   const rpc = options.rpc ?? createHttpRpcCaller(options.rpcUrl);
   const root = resolve(options.assetsRoot ?? DEFAULT_ASSETS);
   const cacheMs = options.cacheMs ?? 4_000;
   const failureCacheMs = options.failureCacheMs ?? 15_000;
   const socialFetch = options.socialFetch ?? fetch;
+  const tradePolicy = options.tradePolicy ?? tradePolicyFromEnv();
+  const historyCacheMs = options.historyCacheMs ?? 30 * 60_000;
   const socialCache = new Map<string, { at: number; value: string }>();
+  const historyCache = new Map<string, { at: number; value: DeployerHistory }>();
+  const historyPending = new Map<string, Promise<DeployerHistory>>();
+  let historyRangeCache: { at: number; value: HistoryRange } | null = null;
+  let historyRangePending: Promise<HistoryRange> | null = null;
   let cached: { at: number; value: LiveSnapshot } | null = null;
   let cachedFailure: { at: number; message: string } | null = null;
   let pending: Promise<LiveSnapshot> | null = null;
@@ -134,12 +163,83 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       const path = requestUrl.pathname;
+      if (path === "/api/trade/prepare") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new TradeGateError("INVALID_REQUEST", "request body must be a JSON object", 400);
+          }
+          const prepared = await preparePonsTrade(rpc, body as TradeRequest, tradePolicy);
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(prepared));
+        } catch (error: unknown) {
+          if (error instanceof TradeGateError) {
+            send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          } else {
+            send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "trade preparation unavailable", code: "UPSTREAM_UNAVAILABLE" }));
+          }
+        }
+        return;
+      }
       if (request.method !== "GET") {
         send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
         return;
       }
       if (path === "/health") {
-        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "read-only", chainId: ROBINHOOD_CHAIN_ID }));
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-gated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled }));
+        return;
+      }
+      if (path === "/api/trade/policy") {
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(publicTradePolicy(tradePolicy)));
+        return;
+      }
+      if (path === "/api/history") {
+        const deployer = requestUrl.searchParams.get("deployer") ?? "";
+        const beforeBlockText = requestUrl.searchParams.get("beforeBlock") ?? "";
+        const beforeLogIndexText = requestUrl.searchParams.get("beforeLogIndex") ?? "";
+        if (!/^0x[0-9a-fA-F]{40}$/.test(deployer) || !/^[0-9]+$/.test(beforeBlockText) || !/^[0-9]+$/.test(beforeLogIndexText)) {
+          send(response, 400, "application/json; charset=utf-8", JSON.stringify({ error: "invalid history query" }));
+          return;
+        }
+        const beforeBlock = Number(beforeBlockText);
+        const beforeLogIndex = Number(beforeLogIndexText);
+        if (!Number.isSafeInteger(beforeBlock) || !Number.isSafeInteger(beforeLogIndex)) {
+          send(response, 400, "application/json; charset=utf-8", JSON.stringify({ error: "invalid history query" }));
+          return;
+        }
+        const key = `${deployer.toLowerCase()}:${beforeBlock}:${beforeLogIndex}`;
+        const hit = historyCache.get(key);
+        if (hit && Date.now() - hit.at < historyCacheMs) {
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(hit.value));
+          return;
+        }
+        try {
+          let pendingHistory = historyPending.get(key);
+          if (!pendingHistory) {
+            pendingHistory = (async () => {
+              if (!historyRangeCache || Date.now() - historyRangeCache.at >= historyCacheMs || beforeBlock > historyRangeCache.value.toBlock) {
+                if (!historyRangePending) historyRangePending = resolveHistoryRange(rpc, 30);
+                try {
+                  historyRangeCache = { at: Date.now(), value: await historyRangePending };
+                } finally {
+                  historyRangePending = null;
+                }
+              }
+              return fetchDeployerHistory(rpc, { deployer, beforeBlock, beforeLogIndex }, historyRangeCache.value);
+            })();
+            historyPending.set(key, pendingHistory);
+          }
+          const value = await pendingHistory;
+          historyCache.set(key, { at: Date.now(), value });
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(value));
+        } catch {
+          send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "historical on-chain research unavailable" }));
+        } finally {
+          historyPending.delete(key);
+        }
         return;
       }
       if (path === "/api/social") {

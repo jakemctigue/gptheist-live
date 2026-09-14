@@ -6,6 +6,11 @@ let timer = null;
 let latestSnapshot = null;
 let activeFilter = "ALL";
 let socialRequest = 0;
+let historyRequest = 0;
+let walletAddress = null;
+let tradePolicy = null;
+let preparedTrade = null;
+const deployerHistoryCache = new Map();
 const short = (value, size=6) => `${value.slice(0,size+2)}…${value.slice(-4)}`;
 const explorer = (hash) => `https://robinhoodchain.blockscout.com/tx/${hash}`;
 const tokenExplorer = (address) => `https://robinhoodchain.blockscout.com/address/${address}`;
@@ -25,6 +30,14 @@ async function researchX(raw){
   catch{if(request===socialRequest)$("social-proof").textContent=`X / @${handle} DECLARED · PUBLIC PROFILE UNAVAILABLE · NOT SCORED`}
 }
 
+const deployerHistoryKey=(launch)=>`${launch.deployer.toLowerCase()}:${launch.blockNumber}:${launch.logIndex}`;
+function renderDeployerHistory(history){$("prior-launches").textContent=String(history.priorLaunches);$("prior-graduated").textContent=String(history.priorGraduations);$("history-window").textContent=`${history.historyWindowDays} DAYS · ${history.historyWindowBlocks.toLocaleString()} BLOCKS`;$("deployer-verdict").textContent=history.priorLaunches===0?"FRESH IN 30 DAYS":history.priorLaunches>=5?"SERIAL LAUNCHER":"RETURNING"}
+async function researchHistory(launch){
+  const request=++historyRequest;$("deployer-verdict").textContent="SCANNING 30 DAYS";$("history-window").textContent="30 DAYS / ONCHAIN";
+  try{const query=new URLSearchParams({deployer:launch.deployer,beforeBlock:String(launch.blockNumber),beforeLogIndex:String(launch.logIndex)});const response=await fetch(`/api/history?${query}`,{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);const history=await response.json();deployerHistoryCache.set(deployerHistoryKey(launch),history);if(request!==historyRequest||selected?.transactionHash!==launch.transactionHash)return;renderDeployerHistory(history)}
+  catch{if(request===historyRequest&&selected?.transactionHash===launch.transactionHash){$("deployer-verdict").textContent="30-DAY SCAN UNAVAILABLE";$("history-window").textContent="RECENT WINDOW ONLY"}}
+}
+
 function renderDossier(launch){
   const market=launch.market,meta=launch.metadata,history=launch.deployerResearch;
   $("dossier-status").textContent=`BLOCK #${launch.blockNumber.toLocaleString()} · ${launch.verdict}`;
@@ -38,6 +51,7 @@ function renderDossier(launch){
   else{$("graduation-left").textContent="—";$("curve-reserves").textContent="—"}
   $("deployer-verdict").textContent=history.priorLaunches===0?"FRESH IN WINDOW":history.priorLaunches>=5?"SERIAL LAUNCHER":"RETURNING";
   $("prior-launches").textContent=String(history.priorLaunches);$("prior-graduated").textContent=String(history.priorGraduations);$("history-window").textContent=`${history.windowBlocks.toLocaleString()} BLOCKS`;
+  const cachedHistory=deployerHistoryCache.get(deployerHistoryKey(launch));if(cachedHistory)renderDeployerHistory(cachedHistory);
   const socialRoot=$("social-links");socialRoot.replaceChildren();const declared=[];
   if(meta.status==="DECLARED")Object.entries(meta.socials).forEach(([type,raw])=>{const url=safeSocialUrl(raw,type);if(!url)return;const a=document.createElement("a");a.href=url;a.target="_blank";a.rel="noopener noreferrer";a.textContent=`${type.toUpperCase()} ↗`;socialRoot.append(a);declared.push(type)});
   if(!declared.length){const empty=document.createElement("span");empty.textContent="NO VALID DECLARED LINKS";socialRoot.append(empty)}
@@ -60,7 +74,9 @@ function animate(decision){
 }
 
 function selectLaunch(launch){
+  const selectionChanged=selected?.transactionHash!==launch.transactionHash;
   selected=launch;
+  if(selectionChanged){preparedTrade=null;if($("send-trade"))$("send-trade").disabled=true;if($("trade-result"))$("trade-result").textContent="Selection changed. Run every execution gate again."}
   document.querySelectorAll(".intercept").forEach(el=>el.classList.toggle("selected",el.dataset.tx===launch.transactionHash));
   $("selected-token").textContent=short(launch.token,8);$("trace-id").textContent=short(launch.transactionHash,8);
   $("pons-link").href=pons(launch.token);$("token-link").href=tokenExplorer(launch.token);$("tx-link").href=explorer(launch.transactionHash);
@@ -78,6 +94,8 @@ function selectLaunch(launch){
   $("evidence").textContent=evidence.join("  /  ");
   renderDossier(launch);
   const trace=$("trace");trace.replaceChildren();launch.handoffs.forEach(h=>{const li=document.createElement("li");li.className=h.outcome.toLowerCase();const seq=document.createElement("span");seq.textContent=`${String(h.sequence).padStart(2,"0")} / ${h.outcome}`;const title=document.createElement("strong");title.textContent=h.agent;const copy=document.createElement("p");copy.textContent=h.message;li.append(seq,title,copy);trace.append(li)});animate(launch);
+  if(selectionChanged&&!deployerHistoryCache.has(deployerHistoryKey(launch)))researchHistory(launch);
+  updateTradeControls();
 }
 
 function renderFeed(snapshot){
@@ -97,5 +115,62 @@ function render(snapshot){
 
 async function sync(){try{const response=await fetch("/api/snapshot",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);render(await response.json())}catch(error){$("pulse").classList.remove("online");$("sync").textContent="RETRYING";$("block").textContent="OFFLINE";$("updated").textContent=String(error.message||error).slice(0,70)}}
 
+const tradeAcknowledgement="I UNDERSTAND THIS SUBMITS A REAL TRADE";
+const txExplorer=(hash)=>`https://robinhoodchain.blockscout.com/tx/${hash}`;
+function readableUnits(raw,decimals){try{const n=BigInt(raw),base=10n**BigInt(decimals),whole=n/base,fraction=(n%base).toString().padStart(decimals,"0").slice(0,6).replace(/0+$/g,"");return `${whole}${fraction?`.${fraction}`:""}`}catch{return "—"}}
+function updateTradeControls(){
+  const ready=Boolean(tradePolicy?.enabled&&walletAddress&&selected&&$("trade-ack").checked&&$("trade-amount").value.trim());
+  $("prepare-trade").disabled=!ready;
+}
+function resetPreparedTrade(message){preparedTrade=null;$("send-trade").disabled=true;$("trade-result").textContent=message;$("trade-tx").hidden=true}
+async function ensureRobinhoodChain(){
+  if(!window.ethereum)throw new Error("No EIP-1193 browser wallet was found.");
+  const chain=await window.ethereum.request({method:"eth_chainId"});
+  if(chain==="0x1237")return;
+  try{await window.ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x1237"}]})}
+  catch(error){if(error&&error.code===4902){await window.ethereum.request({method:"wallet_addEthereumChain",params:[{chainId:"0x1237",chainName:"Robinhood Chain",nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18},rpcUrls:["https://rpc.mainnet.chain.robinhood.com"],blockExplorerUrls:["https://robinhoodchain.blockscout.com"]}]});return}throw error}
+}
+async function connectWallet(){
+  try{
+    await ensureRobinhoodChain();
+    const accounts=await window.ethereum.request({method:"eth_requestAccounts"});
+    const account=Array.isArray(accounts)&&typeof accounts[0]==="string"?accounts[0]:null;
+    if(!account||!/^0x[0-9a-fA-F]{40}$/.test(account))throw new Error("Wallet returned an invalid account.");
+    walletAddress=account.toLowerCase();$("wallet-status").textContent=`CONNECTED ${short(walletAddress,8)} · CHAIN 4663`;$("connect-wallet").textContent="WALLET CONNECTED";resetPreparedTrade("Wallet connected. Select intent and run all gates.");updateTradeControls();
+  }catch(error){walletAddress=null;$("wallet-status").textContent=String(error?.message||error).slice(0,120);updateTradeControls()}
+}
+async function loadTradePolicy(){
+  try{
+    const response=await fetch("/api/trade/policy",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);tradePolicy=await response.json();
+    $("trade-policy-status").textContent=tradePolicy.enabled?"POLICY ARMED":"SERVER DISABLED";$("trade-slippage").max=String(tradePolicy.maxSlippageBps);updateTradeControls();
+  }catch(error){$("trade-policy-status").textContent="POLICY UNAVAILABLE";$("trade-result").textContent=String(error?.message||error).slice(0,100)}
+}
+async function prepareTrade(){
+  if(!selected||!walletAddress)return;
+  resetPreparedTrade("Running chain, venue, amount, fee, quote, simulation, and balance gates…");$("prepare-trade").disabled=true;$("trade-gate-list").replaceChildren();
+  try{
+    await ensureRobinhoodChain();
+    const response=await fetch("/api/trade/prepare",{method:"POST",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({side:$("trade-side").value,token:selected.token,curve:selected.curve,wallet:walletAddress,amount:$("trade-amount").value.trim(),slippageBps:Number($("trade-slippage").value),acknowledgement:tradeAcknowledgement})});
+    const result=await response.json();if(!response.ok)throw new Error(`${result.code||"GATE_BLOCKED"}: ${result.error||`HTTP ${response.status}`}`);
+    preparedTrade=result;result.gates.forEach(gate=>{const li=document.createElement("li");li.textContent=`PASS / ${gate.id} — ${gate.detail}`;$("trade-gate-list").append(li)});
+    $("trade-expected").textContent=`${readableUnits(result.expectedOut,result.outputDecimals)} ${result.side==="BUY"?"TOKEN":"ETH"}`;$("trade-minimum").textContent=`${readableUnits(result.minOut,result.outputDecimals)} ${result.side==="BUY"?"TOKEN":"ETH"}`;$("trade-fees").textContent=`${result.totalFeeBps} BPS`;$("trade-impact").textContent=`${result.priceImpactBps} BPS`;$("trade-expiry").textContent=`BLOCK ${result.expiresAfterBlock.toLocaleString()}`;
+    $("send-trade").disabled=false;$("trade-result").textContent=`PREPARED ${result.auditId}. Review the wallet transaction before approving.`;
+  }catch(error){const li=document.createElement("li");li.className="blocked";li.textContent=String(error?.message||error).slice(0,180);$("trade-gate-list").append(li);$("trade-result").textContent="No transaction was prepared or submitted."}
+  finally{updateTradeControls()}
+}
+async function sendPreparedTrade(){
+  if(!preparedTrade||!walletAddress)return;
+  $("send-trade").disabled=true;$("trade-result").textContent="Opening the wallet's final transaction review…";
+  try{
+    await ensureRobinhoodChain();
+    const head=Number.parseInt(await window.ethereum.request({method:"eth_blockNumber"}),16);if(!Number.isSafeInteger(head)||head>preparedTrade.expiresAfterBlock)throw new Error("Quote expired. Run the execution gates again.");
+    const accounts=await window.ethereum.request({method:"eth_accounts"});if(!Array.isArray(accounts)||String(accounts[0]||"").toLowerCase()!==preparedTrade.wallet)throw new Error("Connected wallet changed. Run the execution gates again.");
+    const hash=await window.ethereum.request({method:"eth_sendTransaction",params:[preparedTrade.transaction]});if(typeof hash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(hash))throw new Error("Wallet returned an invalid transaction hash.");
+    $("trade-result").textContent=`SUBMITTED ${short(hash,10)} · wallet-approved`;$("trade-tx").href=txExplorer(hash);$("trade-tx").hidden=false;preparedTrade=null;
+  }catch(error){$("trade-result").textContent=String(error?.message||error).slice(0,160);$("send-trade").disabled=false}
+}
+
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{activeFilter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));if(latestSnapshot)renderFeed(latestSnapshot)}));
-buildRoute();sync();setInterval(sync,10000);
+$("connect-wallet").addEventListener("click",connectWallet);$("prepare-trade").addEventListener("click",prepareTrade);$("send-trade").addEventListener("click",sendPreparedTrade);["trade-side","trade-amount","trade-slippage","trade-ack"].forEach(id=>$(id).addEventListener("input",()=>{resetPreparedTrade("Trade intent changed. Run every execution gate again.");updateTradeControls()}));
+if(window.ethereum?.on){window.ethereum.on("accountsChanged",accounts=>{walletAddress=Array.isArray(accounts)&&typeof accounts[0]==="string"?accounts[0].toLowerCase():null;$("wallet-status").textContent=walletAddress?`CONNECTED ${short(walletAddress,8)} · VERIFYING CHAIN`:"No wallet connected.";resetPreparedTrade("Wallet state changed. Run every execution gate again.");updateTradeControls()});window.ethereum.on("chainChanged",()=>{resetPreparedTrade("Wallet network changed. Reconnect to Robinhood Chain.");updateTradeControls()})}
+buildRoute();loadTradePolicy();sync();setInterval(sync,10000);

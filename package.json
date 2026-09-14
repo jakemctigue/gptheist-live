@@ -37,6 +37,7 @@
     "start": "node dist/src/cli.js desk --host 0.0.0.0",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "demo": "npm run build --silent && node dist/src/cli.js demo",
+    "alchemy:demo": "node demo-script.js",
     "desk": "npm run build --silent && node dist/src/cli.js desk",
     "prepare": "npm run build"
   },
@@ -48,6 +49,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "viem": "^2.56.5"
   }
 }

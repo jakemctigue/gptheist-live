@@ -36,10 +36,10 @@ test("agents lists every role exactly once", () => {
   for (const name of expected) assert.equal(output.match(new RegExp(`^\\d+\\. ${name} —`, "gm"))?.length, 1);
 });
 
-test("help advertises the live read-only Desk command", () => {
+test("help advertises the wallet-gated Robinhood Chain Desk command", () => {
   const output = execFileSync(process.execPath, [cli, "--help"], { cwd: process.cwd(), encoding: "utf8" });
   assert.match(output, /gptheist desk/);
-  assert.match(output, /read-only Robinhood Chain/);
+  assert.match(output, /browser-wallet trade gates/);
 });
 
 test("doctor checks Node, fixtures, audit directory, dependencies, and paper-only mode", () => {
@@ -48,7 +48,7 @@ test("doctor checks Node, fixtures, audit directory, dependencies, and paper-onl
   assert.match(output, /PASS bundled demo fixture/);
   assert.match(output, /PASS runs directory writable and safe/);
   assert.match(output, /PASS runtime dependencies allowlisted/);
-  assert.match(output, /PASS execution boundary: paper-only/);
+  assert.match(output, /PASS replay execution boundary: paper-only/);
   assert.match(output, /Doctor: 5\/5 checks passed/);
 });
 

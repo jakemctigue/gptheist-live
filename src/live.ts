@@ -112,7 +112,7 @@ function liveHandoffs(launch: LiveLaunch, market: PonsMarketState, assessment: P
   const verified = market.status === "VERIFIED";
   const entries: Array<[AgentOutcome, string]> = [
     ["INFO", `Detected Pons v2 launch in block ${launch.blockNumber}.`],
-    ["INFO", "Policy locked: observe verified factory events; never sign or execute."],
+    ["INFO", "Policy locked: observe verified factory events; only a gated browser wallet can submit."],
     [verified ? "PASS" : "VETO", verified
       ? `Curve state verified: ${market.progressBps / 100}% to graduation; current snipe tax ${market.currentSnipeTaxBps / 100}%.`
       : `Market state unavailable: ${market.reason}`],
@@ -122,7 +122,7 @@ function liveHandoffs(launch: LiveLaunch, market: PonsMarketState, assessment: P
       : "Factory record and curve state could not be verified."],
     [verified ? "INFO" : "VETO", isEthPair
       ? verified
-        ? `Native ETH pair and reserves verified at ${(market.progressBps / 100).toFixed(2)}% curve progress, but executable quote and slippage evidence are not available yet.`
+        ? `Native ETH pair and reserves verified at ${(market.progressBps / 100).toFixed(2)}% curve progress; wallet-specific quote and slippage gates run on demand.`
         : "Native ETH pair found, but liquidity and slippage evidence are unavailable."
       : "Non-ETH pair is outside the default policy."],
     ["INFO", verified
@@ -133,8 +133,8 @@ function liveHandoffs(launch: LiveLaunch, market: PonsMarketState, assessment: P
       ? `Watch gate cleared at ${assessment.score}/100; unresolved evidence remains visible.`
       : `Veto: ${assessment.blockers.join("; ")}.`],
     [assessment.verdict === "WATCH" ? "PASS" : "VETO", assessment.verdict === "WATCH"
-      ? "WATCH approved for read-only monitoring; no order was sent."
-      : "No action approved; no order was sent."]
+      ? "WATCH approved for wallet-gated preparation; no transaction has been prepared yet."
+      : "No trade approved or prepared."]
   ];
   const timestamp = new Date().toISOString();
   return entries.map(([outcome, message], index): AgentHandoff => ({

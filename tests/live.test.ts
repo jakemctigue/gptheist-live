@@ -274,7 +274,7 @@ test("fetches real-shaped Robinhood logs and turns each launch into ten inspecta
   assert.equal(snapshot.launches[0]?.handoffs[8]?.agent, "PALERMO");
   assert.equal(snapshot.launches[0]?.handoffs[8]?.outcome, "VETO");
   assert.match(snapshot.launches[0]?.handoffs[8]?.message ?? "", /market evidence unavailable/i);
-  assert.equal(snapshot.launches[0]?.handoffs[9]?.message.includes("no order"), true);
+  assert.match(snapshot.launches[0]?.handoffs[9]?.message ?? "", /no trade approved or prepared/i);
   assert.equal(snapshot.launches[0]?.market.status, "UNAVAILABLE");
   assert.deepEqual(snapshot.launches[0]?.deployerResearch, {
     windowBlocks: 100,

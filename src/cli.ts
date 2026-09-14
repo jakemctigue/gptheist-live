@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import "dotenv/config";
 import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENTS, EXECUTION_MODE, ensureSafeAuditDirectory, runSimulation, sanitizeTerminal, validateFixture, writeJsonlLog, type ReplayFixture, type SimulationResult } from "./simulation.js";
 import { startDeskServer } from "./server.js";
+import { DEFAULT_RPC_URL } from "./live.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -74,11 +76,15 @@ async function main(args: string[]): Promise<void> {
     const portText = option("--port") ?? process.env.PORT ?? "4173";
     const port = Number(portText);
     if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535");
-    const rpcUrl = process.env.ROBINHOOD_RPC_URL ?? process.env.RPC_URL;
+    const alchemyKey = process.env.ALCHEMY_API_KEY?.trim();
+    const alchemyRpc = alchemyKey && /^[A-Za-z0-9_-]{10,200}$/.test(alchemyKey)
+      ? `https://robinhood-mainnet.g.alchemy.com/v2/${alchemyKey}#nologs,${DEFAULT_RPC_URL}`
+      : undefined;
+    const rpcUrl = process.env.ROBINHOOD_RPC_URL ?? process.env.RPC_URL ?? alchemyRpc;
     const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl } : { host, port });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
-    process.stdout.write(`GPTHEIST DESK — read-only Robinhood Chain watch\nhttp://${sanitizeTerminal(host)}:${boundPort}\nNo wallet. No signing. No live execution.\n`);
+    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nThe server never stores a private key or signs a transaction.\n`);
     await new Promise<void>(() => undefined);
     return;
   }
@@ -98,9 +104,9 @@ async function main(args: string[]): Promise<void> {
       ["runtime dependencies allowlisted", async () => {
         const pkg = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
         const dependencies = Object.keys(pkg.dependencies ?? {}).sort();
-        return dependencies.length === 1 && dependencies[0] === "viem";
+        return dependencies.length === 2 && dependencies[0] === "dotenv" && dependencies[1] === "viem";
       }],
-      ["execution boundary: paper-only", async () => EXECUTION_MODE === "paper-only"]
+      ["replay execution boundary: paper-only", async () => EXECUTION_MODE === "paper-only"]
     ];
     let passed = 0;
     for (const [label, check] of checks) {
@@ -130,7 +136,7 @@ async function main(args: string[]): Promise<void> {
       "  gptheist desk [--host 127.0.0.1] [--port 4173]",
       "  gptheist doctor",
       "",
-      "Desk: read-only Robinhood Chain launch feed; no wallet or execution.",
+      "Desk: Robinhood Chain launch feed with optional browser-wallet trade gates.",
       "Replay: deterministic paper-only simulation.",
       ""
     ].join("\n"));

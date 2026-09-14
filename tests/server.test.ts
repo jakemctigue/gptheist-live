@@ -79,7 +79,7 @@ test("Desk exposes bounded read-only X profile research without arbitrary outbou
   assert.equal((await fetch(`${base}/api/social?handle=https://evil.example`)).status, 400);
 });
 
-test("Desk serves the UI, health, and a read-only live snapshot with defensive headers", async (t) => {
+test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot with defensive headers", async (t) => {
   const server = createDeskServer({ rpc: fakeRpc });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -102,6 +102,8 @@ test("Desk serves the UI, health, and a read-only live snapshot with defensive h
   assert.doesNotMatch(productHtml, /https:\/\/x\.com\/GPTHEIST/);
   assert.match(productHtml, /TARGET DOSSIER/);
   assert.match(productHtml, /SOCIAL FOOTPRINT/);
+  assert.match(productHtml, /EXECUTION GATES/);
+  assert.match(productHtml, /CONNECT WALLET/);
   assert.match(productHtml, /DEPLOYER RECORD/);
   assert.match(productHtml, /LIQUIDITY STATE/);
   assert.match(productHtml, /ROADMAP/);
@@ -130,6 +132,10 @@ test("Desk serves the UI, health, and a read-only live snapshot with defensive h
   assert.match(deskScript, /deployerResearch/);
   assert.match(deskScript, /realQuoteReserve/);
   assert.match(deskScript, /\/api\/social\?handle=/);
+  assert.match(deskScript, /\/api\/history\?/);
+  assert.match(deskScript, /eth_sendTransaction/);
+  assert.equal(deskScript.match(/eth_sendTransaction/g)?.length, 1);
+  assert.match(deskScript, /Quote expired/);
   assert.doesNotMatch(deskScript, /get-token/);
   assert.doesNotMatch(deskScript, /dblclick/);
 
@@ -139,7 +145,11 @@ test("Desk serves the UI, health, and a read-only live snapshot with defensive h
   assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'self'/);
 
   const health = await fetch(`${base}/health`);
-  assert.deepEqual(await health.json(), { status: "ok", mode: "read-only", chainId: 4663 });
+  assert.deepEqual(await health.json(), { status: "ok", mode: "wallet-gated", chainId: 4663, trading: false });
+
+  const policy = await fetch(`${base}/api/trade/policy`);
+  assert.equal(policy.status, 200);
+  assert.equal((await policy.json() as { enabled: boolean }).enabled, false);
 
   const snapshot = await fetch(`${base}/api/snapshot`);
   assert.equal(snapshot.status, 200);

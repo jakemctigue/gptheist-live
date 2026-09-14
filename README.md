@@ -16,9 +16,9 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-f4efe6">
 </p>
 
-GPTHEIST is a read-only Robinhood Chain launch desk plus a deterministic market-replay CLI inspired by the ten-agent operating system described by [@immortalhowwl](https://x.com/immortalhowwl). Every Pons factory launch crosses ten visible evidence stages. Palermo vetoes unsupported action; Professor never sends an order.
+GPTHEIST is a Robinhood Chain launch desk plus a deterministic market-replay CLI inspired by the ten-agent operating system described by [@immortalhowwl](https://x.com/immortalhowwl). Every Pons factory launch crosses ten visible evidence stages. Palermo can veto a trade before the Desk prepares an unsigned Pons v2 curve transaction for the user's browser wallet.
 
-The live Desk reads public chain data only. It has **no wallet connection, private key, signing, brokerage integration, or order execution path**. Raw launch events do not prove liquidity, price quality, slippage, or social quality, so the live trade gate fails closed.
+The server never receives a private key and never signs. It verifies the chain, factory record, curve phase, quote asset, fees, score, size, price impact, wallet balances and a pinned-block simulation. A passing transaction still requires a separate click and approval in the connected EIP-1193 browser wallet.
 
 <p align="center">
   <img src="./assets/desk.png" alt="GPTHEIST Desk showing live Robinhood Chain launches and a Palermo veto" width="100%">
@@ -35,7 +35,7 @@ npm install
 npm run desk
 ```
 
-Open `http://127.0.0.1:4173`. The Desk reads recent `TokenLaunched` events from the verified Pons v2 factory on Robinhood Chain (chain ID `4663`). Double-click an intercept to open its transaction on Blockscout.
+Open `http://127.0.0.1:4173`. The Desk reads recent `TokenLaunched` events from the verified Pons v2 factory on Robinhood Chain (chain ID `4663`). Selecting a launch also loads that deployer's on-chain launch and graduation history for the preceding 30 days. The execution panel can prepare native-ETH curve buys and sells when live trading is enabled.
 
 For the fully offline deterministic replay instead:
 
@@ -78,10 +78,10 @@ Audit: runs/b8d3603a21d62139.jsonl
 
 ## Production deployment
 
-The included `railway.json` builds the TypeScript project, starts the Desk on Railway's assigned `PORT`, and checks `/health`. Deploy the repository from the Railway dashboard or CLI after setting a production RPC endpoint:
+The included `railway.json` builds the TypeScript project, starts the Desk on Railway's assigned `PORT`, and checks `/health`. Deploy the repository from the Railway dashboard or CLI after setting a production RPC endpoint. This example keeps Alchemy as the primary provider and routes event-log history to Robinhood's archive RPC:
 
 ```bash
-railway variables set ROBINHOOD_RPC_URL="https://your-robinhood-chain-rpc.example"
+railway variables set ROBINHOOD_RPC_URL="https://robinhood-mainnet.g.alchemy.com/v2/your-key#nologs,https://rpc.mainnet.chain.robinhood.com"
 railway up
 ```
 
@@ -91,7 +91,22 @@ railway up
 https://read-rpc.example#nologs,https://archive-rpc.example
 ```
 
-The live snapshot scans up to 25,000 recent blocks, so the production endpoint must support historical `eth_getLogs` requests. `RPC_URL` remains supported as a compatibility alias. With neither variable set, the app uses public Robinhood Chain endpoints suitable for local evaluation and light traffic.
+The live feed scans 25,000 recent blocks. A selected deployer's research dossier performs a cached, time-based 30-day scan and discovers the correct starting block from on-chain timestamps. `RPC_URL` remains supported as a compatibility alias. If only `ALCHEMY_API_KEY` is present, the app automatically builds the same Alchemy-plus-archive endpoint list. With none of these variables set, the app uses public Robinhood Chain endpoints suitable for local evaluation and light traffic.
+
+Live trade preparation is disabled by default. Enable it only with explicit limits:
+
+```bash
+railway variables set LIVE_TRADING_ENABLED=true
+railway variables set TRADE_MAX_BUY_WEI=50000000000000000
+railway variables set TRADE_MAX_BUY_WALLET_BPS=1000
+railway variables set TRADE_MAX_SLIPPAGE_BPS=300
+railway variables set TRADE_MAX_PRICE_IMPACT_BPS=500
+railway variables set TRADE_MAX_TOTAL_FEE_BPS=500
+railway variables set TRADE_MIN_BUY_SCORE=70
+railway variables set TRADE_MAX_QUOTE_AGE_BLOCKS=300
+```
+
+`TRADE_MAX_BUY_WEI` defaults to 0.05 ETH. The wallet-relative cap defaults to 10%, slippage to 3%, estimated price impact to 5%, total curve fee plus tax to 5%, the buy score to 70/100, and quote validity to 300 blocks. Sells must fit the connected wallet's token balance. The server returns calldata only after `eth_call` and gas estimation pass; `eth_sendTransaction` exists only in the browser and always opens the wallet's approval screen.
 
 After `npm link`, use the shorter binary form:
 
@@ -153,10 +168,10 @@ These thresholds are demonstration rules, not trading advice or validated predic
 - not ten live LLM instances;
 - not evidence that a historical trade happened;
 - not a backtesting engine or profit calculator;
-- not a wallet, exchange, broker, or execution system;
-- not able to place, sign, route, or settle orders.
+- not a custodial wallet, exchange, broker, or autonomous trading agent;
+- not able to hold a private key, bypass the configured gates, or approve a wallet prompt.
 
-The Desk is connected only to public, read-only Robinhood Chain RPC endpoints. It verifies factory provenance and reads each launch's current Pons state at the same snapshot block. A deterministic score can place supported ETH launches on the **WATCH** list; unsupported pairs, unsafe taxes, completed/rescued curves, malformed evidence, and unavailable reads receive an explicit **VETO**. WATCH is observation only, never an order or promise of market quality.
+The Desk verifies factory provenance and reads each launch's current Pons state at the same snapshot block. A deterministic score can place supported ETH launches on the **WATCH** list; unsupported pairs, unsafe taxes, completed/rescued curves, malformed evidence, and unavailable reads receive an explicit **VETO**. A WATCH result is only one input to the stricter execution policy and is never a promise of market quality.
 
 It is an open, deterministic reference implementation of the **ownership → handoff → veto → final decision** pattern. Use it to inspect and extend the coordination logic before connecting any external system.
 
@@ -173,7 +188,7 @@ The only direct runtime dependency is `viem`, used to ABI-encode and decode pinn
 
 ## Safety
 
-Never put secrets or private keys into fixtures. This project has no live execution path. Any future integration that can publish, spend, sign, delete, or move money must remain behind explicit human approval and should be reviewed independently.
+Never put secrets or private keys into fixtures or server variables. Live transactions are handed to the browser wallet only after all server gates pass, and the user must approve them there. Pons v2 currently reports that its independent audits are still in progress; treat the contracts and launch tokens as experimental and verify the token address and wallet transaction before signing.
 
 ## License
 
