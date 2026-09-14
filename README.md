@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/jakemctigue/gptheist-live/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/jakemctigue/gptheist-live/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="mode" src="https://img.shields.io/badge/mode-paper--only-e5484d">
-  <img alt="runtime dependencies" src="https://img.shields.io/badge/runtime%20dependencies-viem-f4efe6">
+  <img alt="runtime dependencies" src="https://img.shields.io/badge/runtime%20dependencies-dotenv%20%7C%20mongodb%20%7C%20viem-f4efe6">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-f4efe6">
 </p>
 
@@ -74,6 +74,9 @@ Audit: runs/b8d3603a21d62139.jsonl
 | `node dist/src/cli.js replay fixtures/veto.json` | Replays any local fixture and writes an audit log |
 | `node dist/src/cli.js agents` | Lists all ten roles and boundaries |
 | `node dist/src/cli.js doctor` | Checks Node, fixture access, logs, dependencies, and execution mode |
+| `npm run transactions:plan` | Measures a three-calendar-month Robinhood transaction backfill without writing |
+| `npm run transactions:import -- [options]` | Imports strategy-scoped Robinhood transactions into MongoDB with checkpoints |
+| `npm run transactions:sync` | Resumes the Pons-launch backfill, then polls for new Robinhood blocks every second |
 | `npm test` | Builds and runs the complete test suite |
 
 ## Production deployment
@@ -107,6 +110,25 @@ railway variables set TRADE_MAX_QUOTE_AGE_BLOCKS=300
 ```
 
 `TRADE_MAX_BUY_WEI` defaults to 0.05 ETH. The wallet-relative cap defaults to 10%, slippage to 3%, estimated price impact to 5%, total curve fee plus tax to 5%, the buy score to 70/100, and quote validity to 300 blocks. Sells must fit the connected wallet's token balance. The server returns calldata only after `eth_call` and gas estimation pass; `eth_sendTransaction` exists only in the browser and always opens the wallet's approval screen.
+
+## MongoDB transaction backfill
+
+The transaction importer locates the requested start time by block timestamp and upserts hydrated Robinhood transactions into `gptheist.robinhood_transactions`. Its safe default, `--scope pons-launches`, scans indexed `TokenLaunched` logs and hydrates only the matching blocks and transactions used by this launch strategy. `--scope all` remains available for deliberately provisioned bulk stores, but a three-month all-chain plan can be terabyte-scale. A unique chain/hash index makes writes idempotent. `gptheist.ingestion_checkpoints` records the next scanned block after every successful range, so rerunning the same scope and `--job-id` resumes rather than starts over.
+
+For latency-aware analysis, each transaction carries the launch metadata, addresses, function selector, compact calldata size, decimal-string numeric fields (`valueWei`, gas-price fields, and gas limit), `ingestionMode`, and `ingestionLagMs`. Decimal strings avoid losing precision on EVM quantities that exceed JavaScript or MongoDB integer ranges. A TTL index retains 93 days so continuous capture stays close to the requested rolling three-month corpus.
+
+Create a local MongoDB with a persistent Docker volume (or set `MONGODB_URI` for an existing server), then measure the range before importing it:
+
+```powershell
+docker run -d --name gptheist-mongodb --restart unless-stopped -p 127.0.0.1:27017:27017 -v gptheist-mongodb-data:/data/db mongo:8.0
+npm run transactions:plan
+npm run transactions:import -- --job-id robinhood-three-months
+npm run transactions:sync
+```
+
+The default range is three calendar months ending 64 blocks behind the current head. For a bounded pilot, add `--max-blocks 10000`; rerunning the same command advances from its checkpoint. Pin `--from`, `--to-block`, and `--job-id` for a reproducible long-running job. The plan reports a conservative uncompressed storage estimate because full-chain history can be much larger than a workstation disk.
+
+`transactions:sync` uses the same checkpoint, polls the head every 1,000 ms, and persists through one block behind the head to reduce shallow-reorganization risk. The Desk uses the same one-second observation cadence and coalesces concurrent clients through a 900 ms server cache. The one-second cadence is an observation budget, not a profitability claim; use `ingestionLagMs` when training or backtesting so strategies do not assume zero-latency data.
 
 After `npm link`, use the shorter binary form:
 
@@ -184,7 +206,7 @@ npm run build
 npm pack --dry-run
 ```
 
-The only direct runtime dependency is `viem`, used to ABI-encode and decode pinned read-only Multicall3 requests. CI tests Node 18 and Node 20, and dependency audits run before release.
+Direct runtime dependencies are `dotenv` for secret-safe local configuration, `mongodb` for resumable transaction storage, and `viem` for ABI-encoding and decoding pinned read-only Multicall3 requests. CI tests Node 18 and Node 20, and dependency audits run before release.
 
 ## Safety
 

@@ -133,4 +133,4 @@ async function sync() {
   } catch(error) { $("pulse").classList.remove("online");$("block").textContent="OFFLINE";$("updated").textContent=String(error?.message||error).slice(0,70); }
 }
 
-renderCrew();sync();
+renderCrew();sync();setInterval(sync,1000);

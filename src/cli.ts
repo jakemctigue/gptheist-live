@@ -76,15 +76,21 @@ async function main(args: string[]): Promise<void> {
     const portText = option("--port") ?? process.env.PORT ?? "4173";
     const port = Number(portText);
     if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535");
+    const pollMsText = process.env.ROBINHOOD_POLL_MS ?? "1000";
+    const pollMs = Number(pollMsText);
+    if (!Number.isSafeInteger(pollMs) || pollMs < 250 || pollMs > 60_000) {
+      throw new Error("ROBINHOOD_POLL_MS must be an integer from 250 to 60000");
+    }
     const alchemyKey = process.env.ALCHEMY_API_KEY?.trim();
     const alchemyRpc = alchemyKey && /^[A-Za-z0-9_-]{10,200}$/.test(alchemyKey)
       ? `https://robinhood-mainnet.g.alchemy.com/v2/${alchemyKey}#nologs,${DEFAULT_RPC_URL}`
       : undefined;
     const rpcUrl = process.env.ROBINHOOD_RPC_URL ?? process.env.RPC_URL ?? alchemyRpc;
-    const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl } : { host, port });
+    const cacheMs = Math.max(0, pollMs - 100);
+    const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl, cacheMs, failureCacheMs: pollMs } : { host, port, cacheMs, failureCacheMs: pollMs });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
-    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nThe server never stores a private key or signs a transaction.\n`);
+    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. The server never stores a private key or signs a transaction.\n`);
     await new Promise<void>(() => undefined);
     return;
   }
@@ -104,7 +110,7 @@ async function main(args: string[]): Promise<void> {
       ["runtime dependencies allowlisted", async () => {
         const pkg = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
         const dependencies = Object.keys(pkg.dependencies ?? {}).sort();
-        return dependencies.length === 2 && dependencies[0] === "dotenv" && dependencies[1] === "viem";
+        return dependencies.length === 3 && dependencies[0] === "dotenv" && dependencies[1] === "mongodb" && dependencies[2] === "viem";
       }],
       ["replay execution boundary: paper-only", async () => EXECUTION_MODE === "paper-only"]
     ];

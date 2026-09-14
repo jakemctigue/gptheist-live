@@ -38,6 +38,7 @@ export interface TradePolicy {
   enabled: boolean;
   maxBuyWei: bigint;
   maxBuyWalletBps: number;
+  maxSellWalletBps: number;
   maxSlippageBps: number;
   maxPriceImpactBps: number;
   maxTotalFeeBps: number;
@@ -53,6 +54,7 @@ export interface PublicTradePolicy {
   supportedPair: "native ETH";
   maxBuyWei: string;
   maxBuyWalletBps: number;
+  maxSellWalletBps: number;
   maxSlippageBps: number;
   maxPriceImpactBps: number;
   maxTotalFeeBps: number;
@@ -144,7 +146,8 @@ export function tradePolicyFromEnv(env: NodeJS.ProcessEnv = process.env): TradeP
   return {
     enabled: enabledText === "true",
     maxBuyWei: parseBigIntSetting("TRADE_MAX_BUY_WEI", env.TRADE_MAX_BUY_WEI, 50_000_000_000_000_000n),
-    maxBuyWalletBps: parseIntegerSetting("TRADE_MAX_BUY_WALLET_BPS", env.TRADE_MAX_BUY_WALLET_BPS, 1_000, 1, 10_000),
+    maxBuyWalletBps: parseIntegerSetting("TRADE_MAX_BUY_WALLET_BPS", env.TRADE_MAX_BUY_WALLET_BPS, 3_300, 1, 3_300),
+    maxSellWalletBps: parseIntegerSetting("TRADE_MAX_SELL_WALLET_BPS", env.TRADE_MAX_SELL_WALLET_BPS, 3_300, 1, 3_300),
     maxSlippageBps: parseIntegerSetting("TRADE_MAX_SLIPPAGE_BPS", env.TRADE_MAX_SLIPPAGE_BPS, 300, 1, 2_000),
     maxPriceImpactBps: parseIntegerSetting("TRADE_MAX_PRICE_IMPACT_BPS", env.TRADE_MAX_PRICE_IMPACT_BPS, 500, 1, 5_000),
     maxTotalFeeBps: parseIntegerSetting("TRADE_MAX_TOTAL_FEE_BPS", env.TRADE_MAX_TOTAL_FEE_BPS, 500, 1, 5_000),
@@ -162,6 +165,7 @@ export function publicTradePolicy(policy: TradePolicy): PublicTradePolicy {
     supportedPair: "native ETH",
     maxBuyWei: policy.maxBuyWei.toString(),
     maxBuyWalletBps: policy.maxBuyWalletBps,
+    maxSellWalletBps: policy.maxSellWalletBps,
     maxSlippageBps: policy.maxSlippageBps,
     maxPriceImpactBps: policy.maxPriceImpactBps,
     maxTotalFeeBps: policy.maxTotalFeeBps,
@@ -362,6 +366,9 @@ export async function preparePonsTrade(rpc: RpcCaller, input: TradeRequest, poli
       data: await callContract(rpc, token, encodeFunctionData({ abi: TOKEN_ABI, functionName: "balanceOf", args: [wallet] }), blockTag)
     });
     if (amountIn > balance) throw new TradeGateError("TOKEN_BALANCE", "sell amount exceeds the wallet's token balance");
+    if (amountIn * BPS > balance * BigInt(policy.maxSellWalletBps)) {
+      throw new TradeGateError("POSITION_CAP", `sell exceeds ${policy.maxSellWalletBps} bps of the wallet's current token balance`);
+    }
     const grossOut = (amountIn * quoteReserve) / (tokenReserve + amountIn);
     expectedOut = grossOut - (grossOut * BigInt(feeBps)) / BPS - (grossOut * BigInt(creatorTaxBps)) / BPS;
     const minimumOut = minAfterSlippage(expectedOut, slippageBps);
@@ -373,7 +380,7 @@ export async function preparePonsTrade(rpc: RpcCaller, input: TradeRequest, poli
 
   const minimumOut = minAfterSlippage(expectedOut, slippageBps);
   gates.push(
-    { id: "AMOUNT_CAP", passed: true, detail: side === "BUY" ? "Buy amount is within absolute and wallet-relative caps" : "Sell amount is within the wallet token balance" },
+    { id: "AMOUNT_CAP", passed: true, detail: side === "BUY" ? `Buy amount is within the absolute cap and ${policy.maxBuyWalletBps} bps wallet-relative cap` : `Sell amount is within the ${policy.maxSellWalletBps} bps token-balance cap` },
     { id: "SLIPPAGE_LIMIT", passed: true, detail: `Minimum output enforces ${slippageBps} bps slippage` },
     { id: "PRICE_IMPACT", passed: true, detail: `Estimated price impact is within ${policy.maxPriceImpactBps} bps` }
   );

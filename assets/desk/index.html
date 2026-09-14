@@ -138,8 +138,8 @@
         <article class="trade-controls">
           <span>01 / INTENT</span>
           <h3>DEFINE THE TRADE</h3>
-          <button type="button" id="connect-wallet">CONNECT WALLET</button>
-          <p id="wallet-status">No wallet connected.</p>
+          <button type="button" id="connect-wallet">AUTHENTICATE METAMASK</button>
+          <p id="wallet-status">MetaMask authorization required. Ledger and Trezor accounts are supported through MetaMask.</p>
           <label>SIDE<select id="trade-side"><option value="BUY">BUY WITH ETH</option><option value="SELL">SELL TOKEN</option></select></label>
           <label>AMOUNT<input id="trade-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.01"></label>
           <label>SLIPPAGE BPS<input id="trade-slippage" type="number" min="1" max="300" step="1" value="100"></label>
@@ -149,7 +149,7 @@
         <article class="trade-gates">
           <span>02 / POLICY</span>
           <h3>GATE REPORT</h3>
-          <ol id="trade-gate-list"><li>Select a launch, connect a wallet, and run the gates.</li></ol>
+          <ol id="trade-gate-list"><li>Select a launch, authenticate MetaMask, and run the gates. Each trade is capped at 33% of the available input-asset balance.</li></ol>
         </article>
         <article class="trade-review">
           <span>03 / WALLET</span>

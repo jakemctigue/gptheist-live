@@ -52,7 +52,8 @@ const selectors = {
 const policy: TradePolicy = {
   enabled: true,
   maxBuyWei: parseEther("0.05"),
-  maxBuyWalletBps: 1_000,
+  maxBuyWalletBps: 3_300,
+  maxSellWalletBps: 3_300,
   maxSlippageBps: 300,
   maxPriceImpactBps: 500,
   maxTotalFeeBps: 500,
@@ -60,15 +61,16 @@ const policy: TradePolicy = {
   maxQuoteAgeBlocks: 300
 };
 
-function createRpc(options: { snipeTaxBps?: bigint; tokenBalance?: bigint } = {}): { rpc: RpcCaller; methods: string[] } {
+function createRpc(options: { snipeTaxBps?: bigint; tokenBalance?: bigint; nativeBalance?: bigint } = {}): { rpc: RpcCaller; methods: string[] } {
   const methods: string[] = [];
   const snipeTaxBps = options.snipeTaxBps ?? 0n;
   const tokenBalance = options.tokenBalance ?? parseUnits("10000", 18);
+  const nativeBalance = options.nativeBalance ?? parseEther("1");
   const rpc: RpcCaller = async (method, params = []) => {
     methods.push(method);
     if (method === "eth_chainId") return "0x1237";
     if (method === "eth_blockNumber") return "0x1000";
-    if (method === "eth_getBalance") return `0x${parseEther("1").toString(16)}`;
+    if (method === "eth_getBalance") return `0x${nativeBalance.toString(16)}`;
     if (method === "eth_estimateGas") return "0x30d40";
     if (method === "eth_gasPrice") return "0x3b9aca00";
     if (method !== "eth_call") throw new Error(`unexpected method ${method}`);
@@ -117,9 +119,14 @@ function createRpc(options: { snipeTaxBps?: bigint; tokenBalance?: bigint } = {}
 }
 
 test("trade policy is disabled by default and rejects malformed environment limits", () => {
-  assert.equal(tradePolicyFromEnv({}).enabled, false);
+  const defaults = tradePolicyFromEnv({});
+  assert.equal(defaults.enabled, false);
+  assert.equal(defaults.maxBuyWalletBps, 3_300);
+  assert.equal(defaults.maxSellWalletBps, 3_300);
   assert.throws(() => tradePolicyFromEnv({ LIVE_TRADING_ENABLED: "sometimes" }), /must be true or false/);
   assert.throws(() => tradePolicyFromEnv({ TRADE_MAX_SLIPPAGE_BPS: "50000" }), /must be from/);
+  assert.throws(() => tradePolicyFromEnv({ TRADE_MAX_BUY_WALLET_BPS: "3301" }), /must be from 1 to 3300/);
+  assert.throws(() => tradePolicyFromEnv({ TRADE_MAX_SELL_WALLET_BPS: "3301" }), /must be from 1 to 3300/);
 });
 
 test("disabled trading fails before any RPC or wallet operation", async () => {
@@ -158,6 +165,25 @@ test("prepares and simulates a capped native-ETH Pons buy without signing", asyn
   assert.equal(methods.includes("eth_gasPrice"), true);
 });
 
+test("allows exactly 33% of native equity and blocks the next wei", async () => {
+  const { rpc } = createRpc({ nativeBalance: parseEther("1") });
+  const capPolicy = { ...policy, maxBuyWei: parseEther("1") };
+  const request = {
+    side: "BUY" as const,
+    token,
+    curve,
+    wallet,
+    slippageBps: 100,
+    acknowledgement: REQUIRED_TRADE_ACKNOWLEDGEMENT
+  };
+  const prepared = await preparePonsTrade(rpc, { ...request, amount: "0.33" }, capPolicy);
+  assert.equal(prepared.amountIn, parseEther("0.33").toString());
+  await assert.rejects(
+    preparePonsTrade(rpc, { ...request, amount: "0.330000000000000001" }, capPolicy),
+    (error: unknown) => error instanceof TradeGateError && error.code === "POSITION_CAP"
+  );
+});
+
 test("blocks a buy when opening tax breaches the combined fee gate", async () => {
   const { rpc } = createRpc({ snipeTaxBps: 600n });
   await assert.rejects(
@@ -181,13 +207,26 @@ test("prepares a sell only when the wallet owns the requested token amount", asy
     token,
     curve,
     wallet,
-    amount: "10",
+    amount: "6.6",
     slippageBps: 100,
     acknowledgement: REQUIRED_TRADE_ACKNOWLEDGEMENT
   }, policy);
   assert.equal(prepared.side, "SELL");
   assert.equal(prepared.transaction.value, undefined);
-  assert.equal(prepared.amountIn, parseUnits("10", 18).toString());
+  assert.equal(prepared.amountIn, parseUnits("6.6", 18).toString());
+
+  await assert.rejects(
+    preparePonsTrade(rpc, {
+      side: "SELL",
+      token,
+      curve,
+      wallet,
+      amount: "6.600000000000000001",
+      slippageBps: 100,
+      acknowledgement: REQUIRED_TRADE_ACKNOWLEDGEMENT
+    }, policy),
+    (error: unknown) => error instanceof TradeGateError && error.code === "POSITION_CAP"
+  );
 
   await assert.rejects(
     preparePonsTrade(rpc, {
