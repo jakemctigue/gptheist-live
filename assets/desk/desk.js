@@ -8,6 +8,8 @@ let activeFilter = "ALL";
 let socialRequest = 0;
 let historyRequest = 0;
 let walletAddress = null;
+let walletAuthenticated = false;
+let walletProvider = null;
 let tradePolicy = null;
 let preparedTrade = null;
 const deployerHistoryCache = new Map();
@@ -117,32 +119,71 @@ async function sync(){try{const response=await fetch("/api/snapshot",{headers:{a
 
 const tradeAcknowledgement="I UNDERSTAND THIS SUBMITS A REAL TRADE";
 const txExplorer=(hash)=>`https://robinhoodchain.blockscout.com/tx/${hash}`;
+const announcedMetaMaskProviders=new Map();
+const boundWalletProviders=new WeakSet();
+window.addEventListener("eip6963:announceProvider",event=>{const detail=event?.detail;if(!detail||typeof detail.info?.uuid!=="string"||typeof detail.provider?.request!=="function")return;if(detail.info.rdns==="io.metamask"||detail.info.rdns==="io.metamask.flask")announcedMetaMaskProviders.set(detail.info.uuid,detail.provider)});
+window.dispatchEvent(new Event("eip6963:requestProvider"));
 function readableUnits(raw,decimals){try{const n=BigInt(raw),base=10n**BigInt(decimals),whole=n/base,fraction=(n%base).toString().padStart(decimals,"0").slice(0,6).replace(/0+$/g,"");return `${whole}${fraction?`.${fraction}`:""}`}catch{return "—"}}
 function updateTradeControls(){
-  const ready=Boolean(tradePolicy?.enabled&&walletAddress&&selected&&$("trade-ack").checked&&$("trade-amount").value.trim());
+  const ready=Boolean(tradePolicy?.enabled&&walletAuthenticated&&walletAddress&&selected&&$("trade-ack").checked&&$("trade-amount").value.trim());
   $("prepare-trade").disabled=!ready;
 }
 function resetPreparedTrade(message){preparedTrade=null;$("send-trade").disabled=true;$("trade-result").textContent=message;$("trade-tx").hidden=true}
+async function getMetaMaskProvider(){
+  if(walletProvider)return walletProvider;
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  await new Promise(resolve=>setTimeout(resolve,120));
+  walletProvider=announcedMetaMaskProviders.values().next().value||(window.ethereum?.isMetaMask===true?window.ethereum:null);
+  if(!walletProvider)throw new Error("MetaMask was not found. Install or unlock MetaMask and try again.");
+  return walletProvider;
+}
+function bindWalletProvider(provider){
+  if(typeof provider.on!=="function"||boundWalletProviders.has(provider))return;
+  boundWalletProviders.add(provider);
+  provider.on("accountsChanged",()=>{void logoutWallet("Wallet account changed. Authenticate the new account.")});
+  provider.on("chainChanged",()=>{void logoutWallet("Wallet network changed. Authenticate again on Robinhood Chain.")});
+  provider.on("disconnect",()=>{void logoutWallet("MetaMask disconnected. Authenticate again.")});
+}
 async function ensureRobinhoodChain(){
-  if(!window.ethereum)throw new Error("No EIP-1193 browser wallet was found.");
-  const chain=await window.ethereum.request({method:"eth_chainId"});
-  if(chain==="0x1237")return;
-  try{await window.ethereum.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x1237"}]})}
-  catch(error){if(error&&error.code===4902){await window.ethereum.request({method:"wallet_addEthereumChain",params:[{chainId:"0x1237",chainName:"Robinhood Chain",nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18},rpcUrls:["https://rpc.mainnet.chain.robinhood.com"],blockExplorerUrls:["https://robinhoodchain.blockscout.com"]}]});return}throw error}
+  const provider=await getMetaMaskProvider();
+  const chain=await provider.request({method:"eth_chainId"});
+  if(chain==="0x1237")return provider;
+  try{await provider.request({method:"wallet_switchEthereumChain",params:[{chainId:"0x1237"}]})}
+  catch(error){if(error&&error.code===4902){await provider.request({method:"wallet_addEthereumChain",params:[{chainId:"0x1237",chainName:"Robinhood Chain",nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18},rpcUrls:["https://rpc.mainnet.chain.robinhood.com"],blockExplorerUrls:["https://robinhoodchain.blockscout.com"]}]});return provider}throw error}
+  return provider;
 }
 async function connectWallet(){
+  if(walletAuthenticated){await logoutWallet("MetaMask session ended.");return}
   try{
-    await ensureRobinhoodChain();
-    const accounts=await window.ethereum.request({method:"eth_requestAccounts"});
+    const provider=await ensureRobinhoodChain();
+    let accounts;
+    try{await provider.request({method:"wallet_requestPermissions",params:[{eth_accounts:{}}]});accounts=await provider.request({method:"eth_accounts"})}
+    catch(error){if(error?.code!==4200&&error?.code!==-32601)throw error;accounts=await provider.request({method:"eth_requestAccounts"})}
+    if(!Array.isArray(accounts)||accounts.length===0)accounts=await provider.request({method:"eth_requestAccounts"});
     const account=Array.isArray(accounts)&&typeof accounts[0]==="string"?accounts[0]:null;
     if(!account||!/^0x[0-9a-fA-F]{40}$/.test(account))throw new Error("Wallet returned an invalid account.");
-    walletAddress=account.toLowerCase();$("wallet-status").textContent=`CONNECTED ${short(walletAddress,8)} · CHAIN 4663`;$("connect-wallet").textContent="WALLET CONNECTED";resetPreparedTrade("Wallet connected. Select intent and run all gates.");updateTradeControls();
-  }catch(error){walletAddress=null;$("wallet-status").textContent=String(error?.message||error).slice(0,120);updateTradeControls()}
+    const wallet=account.toLowerCase();
+    $("wallet-status").textContent=`SIGNATURE REQUEST · ${short(wallet,8)}`;
+    const challengeResponse=await fetch("/api/auth/challenge",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({wallet})});
+    const challenge=await challengeResponse.json();if(!challengeResponse.ok)throw new Error(`${challenge.code||"AUTH_FAILED"}: ${challenge.error||`HTTP ${challengeResponse.status}`}`);
+    const messageHex=`0x${Array.from(new TextEncoder().encode(challenge.message),byte=>byte.toString(16).padStart(2,"0")).join("")}`;
+    const signature=await provider.request({method:"personal_sign",params:[messageHex,wallet]});
+    const verifyResponse=await fetch("/api/auth/verify",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({challengeId:challenge.challengeId,message:challenge.message,signature})});
+    const verified=await verifyResponse.json();if(!verifyResponse.ok||!verified.authenticated)throw new Error(`${verified.code||"AUTH_FAILED"}: ${verified.error||`HTTP ${verifyResponse.status}`}`);
+    walletAddress=String(verified.wallet).toLowerCase();walletAuthenticated=true;bindWalletProvider(provider);$("wallet-status").textContent=`METAMASK AUTHORIZED ${short(walletAddress,8)} · CHAIN 4663`;$("connect-wallet").textContent="SIGN OUT";resetPreparedTrade("Wallet ownership verified. Hardware-backed accounts remain device-gated. Select intent and run all gates.");updateTradeControls();
+  }catch(error){walletAddress=null;walletAuthenticated=false;$("connect-wallet").textContent="AUTHENTICATE METAMASK";$("wallet-status").textContent=String(error?.message||error).slice(0,120);updateTradeControls()}
+}
+async function logoutWallet(message="MetaMask authentication required."){
+  try{await fetch("/api/auth/logout",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:"{}"})}catch{}
+  walletAddress=null;walletAuthenticated=false;$("connect-wallet").textContent="AUTHENTICATE METAMASK";$("wallet-status").textContent=message;resetPreparedTrade("Authenticate the wallet before preparing a trade.");updateTradeControls();
+}
+async function loadWalletSession(){
+  try{const response=await fetch("/api/auth/session",{credentials:"same-origin",headers:{accept:"application/json"}});if(!response.ok)return;const session=await response.json();if(!session.authenticated)return;walletAddress=String(session.wallet).toLowerCase();walletAuthenticated=true;$("wallet-status").textContent=`AUTHENTICATED ${short(walletAddress,8)} · SESSION RESTORED`;$("connect-wallet").textContent="SIGN OUT";updateTradeControls()}catch{}
 }
 async function loadTradePolicy(){
   try{
     const response=await fetch("/api/trade/policy",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);tradePolicy=await response.json();
-    $("trade-policy-status").textContent=tradePolicy.enabled?"POLICY ARMED":"SERVER DISABLED";$("trade-slippage").max=String(tradePolicy.maxSlippageBps);updateTradeControls();
+    $("trade-policy-status").textContent=tradePolicy.enabled?`POLICY ARMED · ${pct(Math.min(tradePolicy.maxBuyWalletBps,tradePolicy.maxSellWalletBps))} MAX / EQUITY`:"SERVER DISABLED";$("trade-slippage").max=String(tradePolicy.maxSlippageBps);updateTradeControls();
   }catch(error){$("trade-policy-status").textContent="POLICY UNAVAILABLE";$("trade-result").textContent=String(error?.message||error).slice(0,100)}
 }
 async function prepareTrade(){
@@ -150,7 +191,7 @@ async function prepareTrade(){
   resetPreparedTrade("Running chain, venue, amount, fee, quote, simulation, and balance gates…");$("prepare-trade").disabled=true;$("trade-gate-list").replaceChildren();
   try{
     await ensureRobinhoodChain();
-    const response=await fetch("/api/trade/prepare",{method:"POST",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({side:$("trade-side").value,token:selected.token,curve:selected.curve,wallet:walletAddress,amount:$("trade-amount").value.trim(),slippageBps:Number($("trade-slippage").value),acknowledgement:tradeAcknowledgement})});
+    const response=await fetch("/api/trade/prepare",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({side:$("trade-side").value,token:selected.token,curve:selected.curve,wallet:walletAddress,amount:$("trade-amount").value.trim(),slippageBps:Number($("trade-slippage").value),acknowledgement:tradeAcknowledgement})});
     const result=await response.json();if(!response.ok)throw new Error(`${result.code||"GATE_BLOCKED"}: ${result.error||`HTTP ${response.status}`}`);
     preparedTrade=result;result.gates.forEach(gate=>{const li=document.createElement("li");li.textContent=`PASS / ${gate.id} — ${gate.detail}`;$("trade-gate-list").append(li)});
     $("trade-expected").textContent=`${readableUnits(result.expectedOut,result.outputDecimals)} ${result.side==="BUY"?"TOKEN":"ETH"}`;$("trade-minimum").textContent=`${readableUnits(result.minOut,result.outputDecimals)} ${result.side==="BUY"?"TOKEN":"ETH"}`;$("trade-fees").textContent=`${result.totalFeeBps} BPS`;$("trade-impact").textContent=`${result.priceImpactBps} BPS`;$("trade-expiry").textContent=`BLOCK ${result.expiresAfterBlock.toLocaleString()}`;
@@ -162,15 +203,14 @@ async function sendPreparedTrade(){
   if(!preparedTrade||!walletAddress)return;
   $("send-trade").disabled=true;$("trade-result").textContent="Opening the wallet's final transaction review…";
   try{
-    await ensureRobinhoodChain();
-    const head=Number.parseInt(await window.ethereum.request({method:"eth_blockNumber"}),16);if(!Number.isSafeInteger(head)||head>preparedTrade.expiresAfterBlock)throw new Error("Quote expired. Run the execution gates again.");
-    const accounts=await window.ethereum.request({method:"eth_accounts"});if(!Array.isArray(accounts)||String(accounts[0]||"").toLowerCase()!==preparedTrade.wallet)throw new Error("Connected wallet changed. Run the execution gates again.");
-    const hash=await window.ethereum.request({method:"eth_sendTransaction",params:[preparedTrade.transaction]});if(typeof hash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(hash))throw new Error("Wallet returned an invalid transaction hash.");
+    const provider=await ensureRobinhoodChain();bindWalletProvider(provider);
+    const head=Number.parseInt(await provider.request({method:"eth_blockNumber"}),16);if(!Number.isSafeInteger(head)||head>preparedTrade.expiresAfterBlock)throw new Error("Quote expired. Run the execution gates again.");
+    const accounts=await provider.request({method:"eth_accounts"});if(!Array.isArray(accounts)||String(accounts[0]||"").toLowerCase()!==preparedTrade.wallet)throw new Error("Connected wallet changed. Run the execution gates again.");
+    const hash=await provider.request({method:"eth_sendTransaction",params:[preparedTrade.transaction]});if(typeof hash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(hash))throw new Error("Wallet returned an invalid transaction hash.");
     $("trade-result").textContent=`SUBMITTED ${short(hash,10)} · wallet-approved`;$("trade-tx").href=txExplorer(hash);$("trade-tx").hidden=false;preparedTrade=null;
   }catch(error){$("trade-result").textContent=String(error?.message||error).slice(0,160);$("send-trade").disabled=false}
 }
 
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{activeFilter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));if(latestSnapshot)renderFeed(latestSnapshot)}));
 $("connect-wallet").addEventListener("click",connectWallet);$("prepare-trade").addEventListener("click",prepareTrade);$("send-trade").addEventListener("click",sendPreparedTrade);["trade-side","trade-amount","trade-slippage","trade-ack"].forEach(id=>$(id).addEventListener("input",()=>{resetPreparedTrade("Trade intent changed. Run every execution gate again.");updateTradeControls()}));
-if(window.ethereum?.on){window.ethereum.on("accountsChanged",accounts=>{walletAddress=Array.isArray(accounts)&&typeof accounts[0]==="string"?accounts[0].toLowerCase():null;$("wallet-status").textContent=walletAddress?`CONNECTED ${short(walletAddress,8)} · VERIFYING CHAIN`:"No wallet connected.";resetPreparedTrade("Wallet state changed. Run every execution gate again.");updateTradeControls()});window.ethereum.on("chainChanged",()=>{resetPreparedTrade("Wallet network changed. Reconnect to Robinhood Chain.");updateTradeControls()})}
-buildRoute();loadTradePolicy();sync();setInterval(sync,10000);
+buildRoute();loadTradePolicy();loadWalletSession();sync();setInterval(sync,1000);

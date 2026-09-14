@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
+import { privateKeyToAccount } from "viem/accounts";
 import { createDeskServer, createHttpRpcCaller } from "../src/server.js";
 import { TOKEN_LAUNCHED_TOPIC } from "../src/live.js";
+import { aiProviderConfigFromEnv } from "../src/providerConfig.js";
 
 const word = (value: string): string => value.replace(/^0x/, "").padStart(64, "0");
 const topic = (value: string): `0x${string}` => `0x${word(value)}`;
@@ -79,8 +81,57 @@ test("Desk exposes bounded read-only X profile research without arbitrary outbou
   assert.equal((await fetch(`${base}/api/social?handle=https://evil.example`)).status, 400);
 });
 
-test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot with defensive headers", async (t) => {
+test("Desk authenticates a MetaMask-compatible wallet signature and gates trade preparation", async (t) => {
+  const account = privateKeyToAccount(`0x${"33".repeat(32)}`);
   const server = createDeskServer({ rpc: fakeRpc });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const headers = { origin: base, accept: "application/json", "content-type": "application/json" };
+
+  const unauthorized = await fetch(`${base}/api/trade/prepare`, { method: "POST", headers, body: "{}" });
+  assert.equal(unauthorized.status, 401);
+  assert.equal((await unauthorized.json() as { code: string }).code, "AUTH_REQUIRED");
+
+  const crossOrigin = await fetch(`${base}/api/auth/challenge`, {
+    method: "POST",
+    headers: { ...headers, origin: "https://evil.example" },
+    body: JSON.stringify({ wallet: account.address })
+  });
+  assert.equal(crossOrigin.status, 403);
+
+  const challengeResponse = await fetch(`${base}/api/auth/challenge`, {
+    method: "POST", headers, body: JSON.stringify({ wallet: account.address })
+  });
+  assert.equal(challengeResponse.status, 200);
+  const challenge = await challengeResponse.json() as { challengeId: string; message: string };
+  const signature = await account.signMessage({ message: challenge.message });
+  const verifyResponse = await fetch(`${base}/api/auth/verify`, {
+    method: "POST", headers, body: JSON.stringify({ ...challenge, signature })
+  });
+  assert.equal(verifyResponse.status, 200);
+  const setCookie = verifyResponse.headers.get("set-cookie") ?? "";
+  assert.match(setCookie, /^gptheist_wallet_session=[A-Za-z0-9_-]{43};/);
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  const cookie = setCookie.split(";", 1)[0] ?? "";
+
+  const sessionResponse = await fetch(`${base}/api/auth/session`, { headers: { cookie, accept: "application/json" } });
+  assert.deepEqual(await sessionResponse.json(), {
+    authenticated: true,
+    wallet: account.address,
+    expiresAt: (await verifyResponse.json() as { expiresAt: string }).expiresAt
+  });
+
+  const logout = await fetch(`${base}/api/auth/logout`, { method: "POST", headers: { ...headers, cookie }, body: "{}" });
+  assert.equal(logout.status, 200);
+  const expiredSession = await fetch(`${base}/api/auth/session`, { headers: { cookie, accept: "application/json" } });
+  assert.deepEqual(await expiredSession.json(), { authenticated: false });
+});
+
+test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot with defensive headers", async (t) => {
+  const server = createDeskServer({ rpc: fakeRpc, aiProviders: aiProviderConfigFromEnv({}) });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => server.close());
@@ -103,7 +154,8 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
   assert.match(productHtml, /TARGET DOSSIER/);
   assert.match(productHtml, /SOCIAL FOOTPRINT/);
   assert.match(productHtml, /EXECUTION GATES/);
-  assert.match(productHtml, /CONNECT WALLET/);
+  assert.match(productHtml, /AUTHENTICATE METAMASK/);
+  assert.match(productHtml, /Ledger and Trezor accounts are supported through MetaMask/);
   assert.match(productHtml, /DEPLOYER RECORD/);
   assert.match(productHtml, /LIQUIDITY STATE/);
   assert.match(productHtml, /ROADMAP/);
@@ -135,6 +187,11 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
   assert.match(deskScript, /\/api\/history\?/);
   assert.match(deskScript, /eth_sendTransaction/);
   assert.equal(deskScript.match(/eth_sendTransaction/g)?.length, 1);
+  assert.match(deskScript, /personal_sign/);
+  assert.match(deskScript, /eip6963:requestProvider/);
+  assert.match(deskScript, /wallet_requestPermissions/);
+  assert.match(deskScript, /\/api\/auth\/challenge/);
+  assert.match(deskScript, /\/api\/auth\/verify/);
   assert.match(deskScript, /Quote expired/);
   assert.doesNotMatch(deskScript, /get-token/);
   assert.doesNotMatch(deskScript, /dblclick/);
@@ -145,7 +202,24 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
   assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'self'/);
 
   const health = await fetch(`${base}/health`);
-  assert.deepEqual(await health.json(), { status: "ok", mode: "wallet-gated", chainId: 4663, trading: false });
+  assert.deepEqual(await health.json(), {
+    status: "ok",
+    mode: "wallet-authenticated",
+    chainId: 4663,
+    trading: false,
+    providers: {
+      openai: { configured: false, model: "gpt-6-astra" },
+      anthropic: { configured: false, model: "claude-opus-5" },
+      together: { configured: false, model: null }
+    }
+  });
+
+  const providers = await fetch(`${base}/api/providers`);
+  assert.deepEqual(await providers.json(), {
+    openai: { configured: false, model: "gpt-6-astra" },
+    anthropic: { configured: false, model: "claude-opus-5" },
+    together: { configured: false, model: null }
+  });
 
   const policy = await fetch(`${base}/api/trade/policy`);
   assert.equal(policy.status, 200);

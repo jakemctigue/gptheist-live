@@ -34,10 +34,13 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/src/cli.js desk --host 0.0.0.0",
+    "start": "node dist/src/service.js",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "demo": "npm run build --silent && node dist/src/cli.js demo",
     "alchemy:demo": "node demo-script.js",
+    "transactions:plan": "npm run build --silent && node dist/src/transactionImport.js --plan",
+    "transactions:import": "npm run build --silent && node dist/src/transactionImport.js",
+    "transactions:sync": "npm run build --silent && node dist/src/transactionImport.js --scope pons-launches --follow --poll-ms 1000 --confirmations 1 --batch-size 100 --job-id robinhood-three-months",
     "desk": "npm run build --silent && node dist/src/cli.js desk",
     "prepare": "npm run build"
   },
@@ -50,6 +53,7 @@
   },
   "dependencies": {
     "dotenv": "^17.4.2",
+    "mongodb": "^6.21.0",
     "viem": "^2.56.5"
   }
 }

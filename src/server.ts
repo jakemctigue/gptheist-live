@@ -5,9 +5,12 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_RPC_URL, ROBINHOOD_CHAIN_ID, fetchLiveSnapshot, type LiveSnapshot, type RpcCaller } from "./live.js";
 import { fetchDeployerHistory, resolveHistoryRange, type DeployerHistory, type HistoryRange } from "./history.js";
 import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv, type TradePolicy, type TradeRequest } from "./trading.js";
+import { normalizedWallet, WalletAuth, WalletAuthError } from "./walletAuth.js";
+import { aiProviderConfigFromEnv, publicAiProviderStatus, type AiProviderConfig } from "./providerConfig.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
+const WALLET_SESSION_COOKIE = "gptheist_wallet_session";
 const SECURITY_HEADERS = {
   "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "cross-origin-opener-policy": "same-origin",
@@ -25,6 +28,9 @@ export interface DeskServerOptions {
   socialFetch?: typeof fetch;
   tradePolicy?: TradePolicy;
   historyCacheMs?: number;
+  walletAuth?: WalletAuth;
+  publicOrigin?: string;
+  aiProviders?: AiProviderConfig;
 }
 
 export interface RpcCallerOptions {
@@ -91,9 +97,51 @@ export function createHttpRpcCaller(url?: string, options: RpcCallerOptions = {}
   };
 }
 
-function send(response: ServerResponse, status: number, type: string, body: string): void {
-  response.writeHead(status, { ...SECURITY_HEADERS, "content-type": type, "cache-control": type.includes("html") ? "no-store" : "no-cache" });
+function send(response: ServerResponse, status: number, type: string, body: string, headers: Record<string, string> = {}): void {
+  response.writeHead(status, { ...SECURITY_HEADERS, "content-type": type, "cache-control": type.includes("html") ? "no-store" : "no-cache", ...headers });
   response.end(body);
+}
+
+function requestOrigin(request: IncomingMessage, configuredOrigin?: string): string {
+  if (configuredOrigin) return configuredOrigin;
+  const host = request.headers.host;
+  if (!host || host.length > 255 || !/^(?:\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?$/.test(host)) {
+    throw new WalletAuthError("INVALID_ORIGIN", "request host is invalid", 400);
+  }
+  const forwarded = request.headers["x-forwarded-proto"];
+  const forwardedProtocol = typeof forwarded === "string" ? forwarded.split(",", 1)[0]?.trim().toLowerCase() : undefined;
+  if (forwardedProtocol !== undefined && forwardedProtocol !== "http" && forwardedProtocol !== "https") {
+    throw new WalletAuthError("INVALID_ORIGIN", "forwarded request protocol is invalid", 400);
+  }
+  return new URL(`${forwardedProtocol ?? "http"}://${host}`).origin;
+}
+
+function requireSameOrigin(request: IncomingMessage, configuredOrigin?: string): string {
+  const expected = requestOrigin(request, configuredOrigin);
+  if (request.headers.origin !== expected) {
+    throw new WalletAuthError("ORIGIN_MISMATCH", "request origin is not allowed", 403);
+  }
+  return expected;
+}
+
+function sessionToken(request: IncomingMessage): string | null {
+  const cookie = request.headers.cookie;
+  if (!cookie) return null;
+  for (const part of cookie.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== WALLET_SESSION_COOKIE) continue;
+    const token = part.slice(separator + 1).trim();
+    return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : null;
+  }
+  return null;
+}
+
+function sessionCookie(token: string, maxAgeSeconds: number, secure: boolean): string {
+  return `${WALLET_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${secure ? "; Secure" : ""}`;
+}
+
+function authError(response: ServerResponse, error: WalletAuthError): void {
+  send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
 }
 
 async function readJsonBody(request: IncomingMessage, maximumBytes = 8_192): Promise<unknown> {
@@ -122,6 +170,15 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
   const failureCacheMs = options.failureCacheMs ?? 15_000;
   const socialFetch = options.socialFetch ?? fetch;
   const tradePolicy = options.tradePolicy ?? tradePolicyFromEnv();
+  const walletAuth = options.walletAuth ?? new WalletAuth();
+  const aiProviders = options.aiProviders ?? aiProviderConfigFromEnv();
+  const configuredOrigin = options.publicOrigin ?? (process.env.GPTHEIST_PUBLIC_ORIGIN?.trim() || undefined);
+  if (configuredOrigin) {
+    const parsed = new URL(configuredOrigin);
+    if (parsed.origin !== configuredOrigin || !["http:", "https:"].includes(parsed.protocol)) {
+      throw new Error("GPTHEIST_PUBLIC_ORIGIN must be an http(s) origin without a path");
+    }
+  }
   const historyCacheMs = options.historyCacheMs ?? 30 * 60_000;
   const socialCache = new Map<string, { at: number; value: string }>();
   const historyCache = new Map<string, { at: number; value: DeployerHistory }>();
@@ -163,20 +220,107 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       const path = requestUrl.pathname;
+      if (path === "/api/auth/session") {
+        if (request.method !== "GET") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        const session = walletAuth.readSession(sessionToken(request));
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(session
+          ? { authenticated: true, wallet: session.wallet, expiresAt: session.expiresAt }
+          : { authenticated: false }), { "cache-control": "no-store" });
+        return;
+      }
+      if (path === "/api/providers") {
+        if (request.method !== "GET") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(publicAiProviderStatus(aiProviders)), { "cache-control": "no-store" });
+        return;
+      }
+      if (path === "/api/auth/challenge") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          const origin = requireSameOrigin(request, configuredOrigin);
+          const body = await readJsonBody(request);
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new WalletAuthError("INVALID_AUTH_REQUEST", "authentication request must be a JSON object", 400);
+          }
+          const challenge = walletAuth.createChallenge((body as Record<string, unknown>).wallet, origin, request.socket.remoteAddress ?? "unknown");
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(challenge), { "cache-control": "no-store" });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else if (error instanceof TradeGateError) send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          else send(response, 500, "application/json; charset=utf-8", JSON.stringify({ error: "authentication unavailable", code: "AUTH_UNAVAILABLE" }));
+        }
+        return;
+      }
+      if (path === "/api/auth/verify") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          const origin = requireSameOrigin(request, configuredOrigin);
+          const verified = await walletAuth.verifyChallenge(await readJsonBody(request), origin, request.socket.remoteAddress ?? "unknown");
+          const maxAge = Math.max(1, Math.floor((Date.parse(verified.session.expiresAt) - Date.now()) / 1_000));
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify({ authenticated: true, ...verified.session }), {
+            "cache-control": "no-store",
+            "set-cookie": sessionCookie(verified.token, maxAge, origin.startsWith("https://"))
+          });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else if (error instanceof TradeGateError) send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          else send(response, 500, "application/json; charset=utf-8", JSON.stringify({ error: "authentication unavailable", code: "AUTH_UNAVAILABLE" }));
+        }
+        return;
+      }
+      if (path === "/api/auth/logout") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          const origin = requireSameOrigin(request, configuredOrigin);
+          walletAuth.destroySession(sessionToken(request));
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify({ authenticated: false }), {
+            "cache-control": "no-store",
+            "set-cookie": sessionCookie("", 0, origin.startsWith("https://"))
+          });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else send(response, 500, "application/json; charset=utf-8", JSON.stringify({ error: "authentication unavailable", code: "AUTH_UNAVAILABLE" }));
+        }
+        return;
+      }
       if (path === "/api/trade/prepare") {
         if (request.method !== "POST") {
           send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
           return;
         }
         try {
+          requireSameOrigin(request, configuredOrigin);
+          const session = walletAuth.readSession(sessionToken(request));
+          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the trading wallet with MetaMask first", 401);
           const body = await readJsonBody(request);
           if (typeof body !== "object" || body === null || Array.isArray(body)) {
             throw new TradeGateError("INVALID_REQUEST", "request body must be a JSON object", 400);
           }
+          const requestedWallet = normalizedWallet((body as Record<string, unknown>).wallet);
+          if (requestedWallet !== session.wallet) {
+            throw new WalletAuthError("AUTH_WALLET_MISMATCH", "authenticated wallet does not match the trade wallet", 403);
+          }
           const prepared = await preparePonsTrade(rpc, body as TradeRequest, tradePolicy);
+          prepared.gates.splice(2, 0, { id: "WALLET_AUTHENTICATED", passed: true, detail: "Server verified the wallet's one-time signed login challenge" });
           send(response, 200, "application/json; charset=utf-8", JSON.stringify(prepared));
         } catch (error: unknown) {
-          if (error instanceof TradeGateError) {
+          if (error instanceof WalletAuthError) {
+            authError(response, error);
+          } else if (error instanceof TradeGateError) {
             send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
           } else {
             send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "trade preparation unavailable", code: "UPSTREAM_UNAVAILABLE" }));
@@ -189,7 +333,7 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         return;
       }
       if (path === "/health") {
-        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-gated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled }));
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-authenticated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled, providers: publicAiProviderStatus(aiProviders) }));
         return;
       }
       if (path === "/api/trade/policy") {
