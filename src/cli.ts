@@ -90,7 +90,7 @@ async function main(args: string[]): Promise<void> {
     const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl, cacheMs, failureCacheMs: pollMs } : { host, port, cacheMs, failureCacheMs: pollMs });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
-    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. The server never stores a private key or signs a transaction.\n`);
+    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. The server never receives the treasury key; an optional isolated session key can be configured.\n`);
     await new Promise<void>(() => undefined);
     return;
   }
@@ -110,7 +110,11 @@ async function main(args: string[]): Promise<void> {
       ["runtime dependencies allowlisted", async () => {
         const pkg = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
         const dependencies = Object.keys(pkg.dependencies ?? {}).sort();
-        return dependencies.length === 3 && dependencies[0] === "dotenv" && dependencies[1] === "mongodb" && dependencies[2] === "viem";
+        return dependencies.length === 4
+          && dependencies[0] === "@alchemy/wallet-apis"
+          && dependencies[1] === "dotenv"
+          && dependencies[2] === "mongodb"
+          && dependencies[3] === "viem";
       }],
       ["replay execution boundary: paper-only", async () => EXECUTION_MODE === "paper-only"]
     ];

@@ -12,6 +12,8 @@ let walletAuthenticated = false;
 let walletProvider = null;
 let tradePolicy = null;
 let preparedTrade = null;
+let smartAccountConfiguration = null;
+let smartAccountGrant = null;
 const deployerHistoryCache = new Map();
 const short = (value, size=6) => `${value.slice(0,size+2)}…${value.slice(-4)}`;
 const explorer = (hash) => `https://robinhoodchain.blockscout.com/tx/${hash}`;
@@ -127,6 +129,8 @@ function readableUnits(raw,decimals){try{const n=BigInt(raw),base=10n**BigInt(de
 function updateTradeControls(){
   const ready=Boolean(tradePolicy?.enabled&&walletAuthenticated&&walletAddress&&selected&&$("trade-ack").checked&&$("trade-amount").value.trim());
   $("prepare-trade").disabled=!ready;
+  $("setup-smart-account").disabled=!Boolean(smartAccountConfiguration?.enabled&&walletAuthenticated&&walletAddress&&selected&&!smartAccountGrant);
+  $("revoke-smart-account").disabled=!Boolean(walletAuthenticated&&smartAccountGrant?.status==="ACTIVE");
 }
 function resetPreparedTrade(message){preparedTrade=null;$("send-trade").disabled=true;$("trade-result").textContent=message;$("trade-tx").hidden=true}
 async function getMetaMaskProvider(){
@@ -170,21 +174,55 @@ async function connectWallet(){
     const signature=await provider.request({method:"personal_sign",params:[messageHex,wallet]});
     const verifyResponse=await fetch("/api/auth/verify",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({challengeId:challenge.challengeId,message:challenge.message,signature})});
     const verified=await verifyResponse.json();if(!verifyResponse.ok||!verified.authenticated)throw new Error(`${verified.code||"AUTH_FAILED"}: ${verified.error||`HTTP ${verifyResponse.status}`}`);
-    walletAddress=String(verified.wallet).toLowerCase();walletAuthenticated=true;bindWalletProvider(provider);$("wallet-status").textContent=`METAMASK AUTHORIZED ${short(walletAddress,8)} · CHAIN 4663`;$("connect-wallet").textContent="SIGN OUT";resetPreparedTrade("Wallet ownership verified. Hardware-backed accounts remain device-gated. Select intent and run all gates.");updateTradeControls();
+    walletAddress=String(verified.wallet).toLowerCase();walletAuthenticated=true;bindWalletProvider(provider);$("wallet-status").textContent=`METAMASK AUTHORIZED ${short(walletAddress,8)} · CHAIN 4663`;$("connect-wallet").textContent="SIGN OUT";resetPreparedTrade("Wallet ownership verified. Hardware-backed accounts remain device-gated. Select intent and run all gates.");await loadSmartAccountStatus();updateTradeControls();
   }catch(error){walletAddress=null;walletAuthenticated=false;$("connect-wallet").textContent="AUTHENTICATE METAMASK";$("wallet-status").textContent=String(error?.message||error).slice(0,120);updateTradeControls()}
 }
 async function logoutWallet(message="MetaMask authentication required."){
   try{await fetch("/api/auth/logout",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:"{}"})}catch{}
-  walletAddress=null;walletAuthenticated=false;$("connect-wallet").textContent="AUTHENTICATE METAMASK";$("wallet-status").textContent=message;resetPreparedTrade("Authenticate the wallet before preparing a trade.");updateTradeControls();
+  walletAddress=null;walletAuthenticated=false;smartAccountGrant=null;$("connect-wallet").textContent="AUTHENTICATE METAMASK";$("wallet-status").textContent=message;$("smart-account-status").textContent="Authenticate the MetaMask treasury to inspect its execution account.";resetPreparedTrade("Authenticate the wallet before preparing a trade.");updateTradeControls();
 }
 async function loadWalletSession(){
-  try{const response=await fetch("/api/auth/session",{credentials:"same-origin",headers:{accept:"application/json"}});if(!response.ok)return;const session=await response.json();if(!session.authenticated)return;walletAddress=String(session.wallet).toLowerCase();walletAuthenticated=true;$("wallet-status").textContent=`AUTHENTICATED ${short(walletAddress,8)} · SESSION RESTORED`;$("connect-wallet").textContent="SIGN OUT";updateTradeControls()}catch{}
+  try{const response=await fetch("/api/auth/session",{credentials:"same-origin",headers:{accept:"application/json"}});if(!response.ok)return;const session=await response.json();if(!session.authenticated)return;walletAddress=String(session.wallet).toLowerCase();walletAuthenticated=true;$("wallet-status").textContent=`AUTHENTICATED ${short(walletAddress,8)} · SESSION RESTORED`;$("connect-wallet").textContent="SIGN OUT";await loadSmartAccountStatus();updateTradeControls()}catch{}
 }
 async function loadTradePolicy(){
   try{
     const response=await fetch("/api/trade/policy",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);tradePolicy=await response.json();
-    $("trade-policy-status").textContent=tradePolicy.enabled?`POLICY ARMED · ${pct(Math.min(tradePolicy.maxBuyWalletBps,tradePolicy.maxSellWalletBps))} MAX / EQUITY`:"SERVER DISABLED";$("trade-slippage").max=String(tradePolicy.maxSlippageBps);updateTradeControls();
+    $("trade-policy-status").textContent=tradePolicy.enabled?"POLICY ARMED · ABSOLUTE CAPS · NO % EQUITY CAP":"SERVER DISABLED";$("trade-slippage").max=String(tradePolicy.maxSlippageBps);updateTradeControls();
   }catch(error){$("trade-policy-status").textContent="POLICY UNAVAILABLE";$("trade-result").textContent=String(error?.message||error).slice(0,100)}
+}
+function renderSmartAccountGrant(grant){
+  smartAccountGrant=grant;
+  $("smart-account-link").hidden=!grant;$("smart-account-funding").hidden=!grant;
+  if(!grant){$("smart-account-status").textContent=smartAccountConfiguration?.enabled?"Ready. Select a verified Pons launch, then authorize the isolated 24-hour account.":smartAccountConfiguration?.reason||"ERC-4337 setup is not configured.";updateTradeControls();return}
+  $("smart-account-link").href=tokenExplorer(grant.account);$("smart-account-funding").href=txExplorer(grant.fundingTransactionHash);
+  const expiry=new Date(grant.expiresAt).toLocaleString();$("smart-account-status").textContent=`${grant.status} · ${short(grant.account,8)} · ${short(grant.token,8)} / ${short(grant.curve,8)} · EXPIRES ${expiry}`;updateTradeControls();
+}
+async function loadSmartAccountStatus(){
+  if(!walletAuthenticated){renderSmartAccountGrant(null);return}
+  try{const response=await fetch("/api/smart-account/status",{credentials:"same-origin",headers:{accept:"application/json"}});const result=await response.json();if(!response.ok)throw new Error(`${result.code||"STATUS_FAILED"}: ${result.error||`HTTP ${response.status}`}`);renderSmartAccountGrant(result.grant)}catch(error){smartAccountGrant=null;$("smart-account-status").textContent=String(error?.message||error).slice(0,160);updateTradeControls()}
+}
+async function loadSmartAccountConfiguration(){
+  try{const response=await fetch("/api/smart-account/config",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);smartAccountConfiguration=await response.json();$("smart-account-status").textContent=smartAccountConfiguration.enabled?"Authenticate MetaMask and select a verified Pons launch to create the isolated execution account.":smartAccountConfiguration.reason;updateTradeControls()}catch(error){smartAccountConfiguration={enabled:false,reason:String(error?.message||error)};$("smart-account-status").textContent="ERC-4337 configuration unavailable.";updateTradeControls()}
+}
+async function setupSmartAccount(){
+  if(!selected||!walletAddress||!smartAccountConfiguration?.enabled)return;
+  $("setup-smart-account").disabled=true;$("smart-account-status").textContent="Verifying Pons provenance and pricing the $30 ceiling…";
+  try{
+    const provider=await ensureRobinhoodChain();bindWalletProvider(provider);
+    const planResponse=await fetch("/api/smart-account/plan",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({token:selected.token,curve:selected.curve})});
+    const plan=await planResponse.json();if(!planResponse.ok)throw new Error(`${plan.code||"PLAN_FAILED"}: ${plan.error||`HTTP ${planResponse.status}`}`);
+    $("smart-account-cap").textContent=`$${plan.spendCapUsd} / ${formatWei(plan.spendCapWei)} + ${formatWei(plan.gasReserveWei)} GAS`;
+    $("smart-account-status").textContent=`MetaMask will authorize ${short(plan.sessionKey,8)} until ${new Date(plan.expiresAt).toLocaleString()}, then fund exactly ${formatWei(plan.totalFundingWei)}.`;
+    if(!window.GptheistSmartAccount?.setup)throw new Error("Alchemy Wallet API client did not load.");
+    const result=await window.GptheistSmartAccount.setup({provider,owner:walletAddress,plan});
+    $("smart-account-link").href=tokenExplorer(result.account);$("smart-account-link").hidden=false;$("smart-account-funding").href=txExplorer(result.fundingTransactionHash);$("smart-account-funding").hidden=false;
+    await loadSmartAccountStatus();
+  }catch(error){$("smart-account-status").textContent=String(error?.message||error).slice(0,220)}
+  finally{updateTradeControls()}
+}
+async function revokeSmartAccount(){
+  $("revoke-smart-account").disabled=true;$("smart-account-status").textContent="Deleting the only usable permission context…";
+  try{const response=await fetch("/api/smart-account/revoke",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:"{}"});const result=await response.json();if(!response.ok)throw new Error(`${result.code||"REVOKE_FAILED"}: ${result.error||`HTTP ${response.status}`}`);await loadSmartAccountStatus()}catch(error){$("smart-account-status").textContent=String(error?.message||error).slice(0,180)}finally{updateTradeControls()}
 }
 async function prepareTrade(){
   if(!selected||!walletAddress)return;
@@ -212,5 +250,5 @@ async function sendPreparedTrade(){
 }
 
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{activeFilter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));if(latestSnapshot)renderFeed(latestSnapshot)}));
-$("connect-wallet").addEventListener("click",connectWallet);$("prepare-trade").addEventListener("click",prepareTrade);$("send-trade").addEventListener("click",sendPreparedTrade);["trade-side","trade-amount","trade-slippage","trade-ack"].forEach(id=>$(id).addEventListener("input",()=>{resetPreparedTrade("Trade intent changed. Run every execution gate again.");updateTradeControls()}));
-buildRoute();loadTradePolicy();loadWalletSession();sync();setInterval(sync,1000);
+$("connect-wallet").addEventListener("click",connectWallet);$("prepare-trade").addEventListener("click",prepareTrade);$("send-trade").addEventListener("click",sendPreparedTrade);$("setup-smart-account").addEventListener("click",setupSmartAccount);$("revoke-smart-account").addEventListener("click",revokeSmartAccount);["trade-side","trade-amount","trade-slippage","trade-ack"].forEach(id=>$(id).addEventListener("input",()=>{resetPreparedTrade("Trade intent changed. Run every execution gate again.");updateTradeControls()}));
+buildRoute();loadTradePolicy();loadSmartAccountConfiguration();loadWalletSession();sync();setInterval(sync,1000);

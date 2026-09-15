@@ -33,7 +33,7 @@
     "SECURITY.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-browser.mjs",
     "start": "node dist/src/service.js",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "demo": "npm run build --silent && node dist/src/cli.js demo",
@@ -49,9 +49,11 @@
   },
   "devDependencies": {
     "@types/node": "^18.19.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@alchemy/wallet-apis": "^5.2.5",
     "dotenv": "^17.4.2",
     "mongodb": "^6.21.0",
     "viem": "^2.56.5"

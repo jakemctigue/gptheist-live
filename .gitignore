@@ -1,5 +1,6 @@
 node_modules/
 dist/
+assets/desk/smart-account.js
 runs/
 *.tgz
 .env
