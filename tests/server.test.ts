@@ -207,6 +207,7 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
     mode: "wallet-authenticated",
     chainId: 4663,
     trading: false,
+    smartAccounts: false,
     providers: {
       openai: { configured: false, model: "gpt-6-astra" },
       anthropic: { configured: false, model: "claude-opus-5" },

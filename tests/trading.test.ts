@@ -52,8 +52,6 @@ const selectors = {
 const policy: TradePolicy = {
   enabled: true,
   maxBuyWei: parseEther("0.05"),
-  maxBuyWalletBps: 3_300,
-  maxSellWalletBps: 3_300,
   maxSlippageBps: 300,
   maxPriceImpactBps: 500,
   maxTotalFeeBps: 500,
@@ -121,12 +119,8 @@ function createRpc(options: { snipeTaxBps?: bigint; tokenBalance?: bigint; nativ
 test("trade policy is disabled by default and rejects malformed environment limits", () => {
   const defaults = tradePolicyFromEnv({});
   assert.equal(defaults.enabled, false);
-  assert.equal(defaults.maxBuyWalletBps, 3_300);
-  assert.equal(defaults.maxSellWalletBps, 3_300);
   assert.throws(() => tradePolicyFromEnv({ LIVE_TRADING_ENABLED: "sometimes" }), /must be true or false/);
   assert.throws(() => tradePolicyFromEnv({ TRADE_MAX_SLIPPAGE_BPS: "50000" }), /must be from/);
-  assert.throws(() => tradePolicyFromEnv({ TRADE_MAX_BUY_WALLET_BPS: "3301" }), /must be from 1 to 3300/);
-  assert.throws(() => tradePolicyFromEnv({ TRADE_MAX_SELL_WALLET_BPS: "3301" }), /must be from 1 to 3300/);
 });
 
 test("disabled trading fails before any RPC or wallet operation", async () => {
@@ -165,7 +159,7 @@ test("prepares and simulates a capped native-ETH Pons buy without signing", asyn
   assert.equal(methods.includes("eth_gasPrice"), true);
 });
 
-test("allows exactly 33% of native equity and blocks the next wei", async () => {
+test("allows buys above the former equity percentage cap and retains the absolute cap", async () => {
   const { rpc } = createRpc({ nativeBalance: parseEther("1") });
   const capPolicy = { ...policy, maxBuyWei: parseEther("1") };
   const request = {
@@ -176,11 +170,11 @@ test("allows exactly 33% of native equity and blocks the next wei", async () => 
     slippageBps: 100,
     acknowledgement: REQUIRED_TRADE_ACKNOWLEDGEMENT
   };
-  const prepared = await preparePonsTrade(rpc, { ...request, amount: "0.33" }, capPolicy);
-  assert.equal(prepared.amountIn, parseEther("0.33").toString());
+  const prepared = await preparePonsTrade(rpc, { ...request, amount: "0.34" }, capPolicy);
+  assert.equal(prepared.amountIn, parseEther("0.34").toString());
   await assert.rejects(
-    preparePonsTrade(rpc, { ...request, amount: "0.330000000000000001" }, capPolicy),
-    (error: unknown) => error instanceof TradeGateError && error.code === "POSITION_CAP"
+    preparePonsTrade(rpc, { ...request, amount: "1.000000000000000001" }, capPolicy),
+    (error: unknown) => error instanceof TradeGateError && error.code === "BUY_CAP"
   );
 });
 
@@ -200,33 +194,20 @@ test("blocks a buy when opening tax breaches the combined fee gate", async () =>
   );
 });
 
-test("prepares a sell only when the wallet owns the requested token amount", async () => {
+test("allows selling the full token balance and blocks an overdraft", async () => {
   const { rpc } = createRpc({ tokenBalance: parseUnits("20", 18) });
   const prepared = await preparePonsTrade(rpc, {
     side: "SELL",
     token,
     curve,
     wallet,
-    amount: "6.6",
+    amount: "20",
     slippageBps: 100,
     acknowledgement: REQUIRED_TRADE_ACKNOWLEDGEMENT
   }, policy);
   assert.equal(prepared.side, "SELL");
   assert.equal(prepared.transaction.value, undefined);
-  assert.equal(prepared.amountIn, parseUnits("6.6", 18).toString());
-
-  await assert.rejects(
-    preparePonsTrade(rpc, {
-      side: "SELL",
-      token,
-      curve,
-      wallet,
-      amount: "6.600000000000000001",
-      slippageBps: 100,
-      acknowledgement: REQUIRED_TRADE_ACKNOWLEDGEMENT
-    }, policy),
-    (error: unknown) => error instanceof TradeGateError && error.code === "POSITION_CAP"
-  );
+  assert.equal(prepared.amountIn, parseUnits("20", 18).toString());
 
   await assert.rejects(
     preparePonsTrade(rpc, {

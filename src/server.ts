@@ -7,6 +7,7 @@ import { fetchDeployerHistory, resolveHistoryRange, type DeployerHistory, type H
 import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv, type TradePolicy, type TradeRequest } from "./trading.js";
 import { normalizedWallet, WalletAuth, WalletAuthError } from "./walletAuth.js";
 import { aiProviderConfigFromEnv, publicAiProviderStatus, type AiProviderConfig } from "./providerConfig.js";
+import { SmartAccountCoordinator, SmartAccountError } from "./smartAccount.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
@@ -31,6 +32,7 @@ export interface DeskServerOptions {
   walletAuth?: WalletAuth;
   publicOrigin?: string;
   aiProviders?: AiProviderConfig;
+  smartAccounts?: SmartAccountCoordinator;
 }
 
 export interface RpcCallerOptions {
@@ -144,6 +146,10 @@ function authError(response: ServerResponse, error: WalletAuthError): void {
   send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
 }
 
+function smartAccountError(response: ServerResponse, error: SmartAccountError): void {
+  send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+}
+
 async function readJsonBody(request: IncomingMessage, maximumBytes = 8_192): Promise<unknown> {
   if (!(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
     throw new TradeGateError("CONTENT_TYPE", "content-type must be application/json", 415);
@@ -153,7 +159,7 @@ async function readJsonBody(request: IncomingMessage, maximumBytes = 8_192): Pro
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > maximumBytes) throw new TradeGateError("BODY_TOO_LARGE", "request body exceeds 8192 bytes", 413);
+    if (size > maximumBytes) throw new TradeGateError("BODY_TOO_LARGE", `request body exceeds ${maximumBytes} bytes`, 413);
     chunks.push(buffer);
   }
   try {
@@ -172,6 +178,7 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
   const tradePolicy = options.tradePolicy ?? tradePolicyFromEnv();
   const walletAuth = options.walletAuth ?? new WalletAuth();
   const aiProviders = options.aiProviders ?? aiProviderConfigFromEnv();
+  const smartAccounts = options.smartAccounts ?? new SmartAccountCoordinator({ rpc });
   const configuredOrigin = options.publicOrigin ?? (process.env.GPTHEIST_PUBLIC_ORIGIN?.trim() || undefined);
   if (configuredOrigin) {
     const parsed = new URL(configuredOrigin);
@@ -213,6 +220,7 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     "/vault": ["room.html", "text/html; charset=utf-8"],
     "/desk.css": ["desk.css", "text/css; charset=utf-8"],
     "/desk.js": ["desk.js", "text/javascript; charset=utf-8"],
+    "/smart-account.js": ["smart-account.js", "text/javascript; charset=utf-8"],
     "/rooms.js": ["rooms.js", "text/javascript; charset=utf-8"]
   };
 
@@ -297,6 +305,85 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         return;
       }
+      if (path === "/api/smart-account/plan") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          requireSameOrigin(request, configuredOrigin);
+          const session = walletAuth.readSession(sessionToken(request));
+          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
+          const body = await readJsonBody(request);
+          if (typeof body !== "object" || body === null || Array.isArray(body)) throw new SmartAccountError("INVALID_PLAN", "plan body must be an object", 400);
+          const value = body as Record<string, unknown>;
+          const plan = await smartAccounts.createPlan(session.wallet, value.token, value.curve);
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(plan), { "cache-control": "no-store" });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else if (error instanceof SmartAccountError) smartAccountError(response, error);
+          else if (error instanceof TradeGateError) send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          else send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "smart-account planning unavailable", code: "UPSTREAM_UNAVAILABLE" }));
+        }
+        return;
+      }
+      if (path === "/api/smart-account/rpc") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          requireSameOrigin(request, configuredOrigin);
+          const session = walletAuth.readSession(sessionToken(request));
+          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
+          const payload = await smartAccounts.proxyWalletRpc(session.wallet, await readJsonBody(request, 32_768));
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(payload), { "cache-control": "no-store" });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else if (error instanceof SmartAccountError) smartAccountError(response, error);
+          else if (error instanceof TradeGateError) send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          else send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "Alchemy Wallet API unavailable", code: "UPSTREAM_UNAVAILABLE" }));
+        }
+        return;
+      }
+      if (path === "/api/smart-account/activate") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          requireSameOrigin(request, configuredOrigin);
+          const session = walletAuth.readSession(sessionToken(request));
+          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
+          const active = await smartAccounts.activate(session.wallet, await readJsonBody(request));
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(active), { "cache-control": "no-store" });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else if (error instanceof SmartAccountError) smartAccountError(response, error);
+          else if (error instanceof TradeGateError) send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          else send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "smart-account activation unavailable", code: "UPSTREAM_UNAVAILABLE" }));
+        }
+        return;
+      }
+      if (path === "/api/smart-account/revoke") {
+        if (request.method !== "POST") {
+          send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+          return;
+        }
+        try {
+          requireSameOrigin(request, configuredOrigin);
+          const session = walletAuth.readSession(sessionToken(request));
+          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
+          const revoked = await smartAccounts.revoke(session.wallet);
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(revoked), { "cache-control": "no-store" });
+        } catch (error: unknown) {
+          if (error instanceof WalletAuthError) authError(response, error);
+          else if (error instanceof SmartAccountError) smartAccountError(response, error);
+          else if (error instanceof TradeGateError) send(response, error.status, "application/json; charset=utf-8", JSON.stringify({ error: error.message, code: error.code }));
+          else send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: "smart-account revocation unavailable", code: "UPSTREAM_UNAVAILABLE" }));
+        }
+        return;
+      }
       if (path === "/api/trade/prepare") {
         if (request.method !== "POST") {
           send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
@@ -333,7 +420,20 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         return;
       }
       if (path === "/health") {
-        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-authenticated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled, providers: publicAiProviderStatus(aiProviders) }));
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-authenticated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled, smartAccounts: smartAccounts.publicConfiguration().enabled, providers: publicAiProviderStatus(aiProviders) }));
+        return;
+      }
+      if (path === "/api/smart-account/config") {
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(smartAccounts.publicConfiguration()), { "cache-control": "no-store" });
+        return;
+      }
+      if (path === "/api/smart-account/status") {
+        const session = walletAuth.readSession(sessionToken(request));
+        if (!session) {
+          send(response, 401, "application/json; charset=utf-8", JSON.stringify({ error: "authenticate the MetaMask treasury first", code: "AUTH_REQUIRED" }), { "cache-control": "no-store" });
+          return;
+        }
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ grant: await smartAccounts.status(session.wallet) }), { "cache-control": "no-store" });
         return;
       }
       if (path === "/api/trade/policy") {

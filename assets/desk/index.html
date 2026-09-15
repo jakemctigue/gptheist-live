@@ -19,7 +19,7 @@
       <a href="/vault">VAULT</a>
     </nav>
     <div class="chain-lock"><i id="pulse"></i><span>ROBINHOOD CHAIN</span><b id="block">CONNECTING</b></div>
-    <div class="safety">WALLET-GATED<br><b>USER SIGNS · CAPS ENFORCED</b></div>
+    <div class="safety">WALLET-GATED<br><b>TREASURY SIGNS · SESSION CAPPED</b></div>
   </header>
 
   <div class="system-strip" aria-label="System guarantees">
@@ -131,7 +131,7 @@
 
     <section class="trade-panel" id="trade" aria-label="Wallet-gated Pons trade preparation">
       <div class="section-head">
-        <div><span>SELECTED TARGET / EXPLICIT WALLET APPROVAL</span><h2>EXECUTION GATES</h2></div>
+        <div><span>SELECTED TARGET / TREASURY + SESSION AUTHORITY</span><h2>EXECUTION GATES</h2></div>
         <b id="trade-policy-status">LOADING POLICY</b>
       </div>
       <div class="trade-grid">
@@ -149,7 +149,7 @@
         <article class="trade-gates">
           <span>02 / POLICY</span>
           <h3>GATE REPORT</h3>
-          <ol id="trade-gate-list"><li>Select a launch, authenticate MetaMask, and run the gates. Each trade is capped at 33% of the available input-asset balance.</li></ol>
+          <ol id="trade-gate-list"><li>Select a launch, authenticate MetaMask, and run the gates. The wallet-relative 33% cap has been removed; the absolute buy, slippage, impact, fee, and balance gates remain.</li></ol>
         </article>
         <article class="trade-review">
           <span>03 / WALLET</span>
@@ -166,6 +166,27 @@
           <a id="trade-tx" hidden target="_blank" rel="noopener noreferrer">VIEW TRANSACTION ↗</a>
         </article>
       </div>
+      <article class="smart-account-setup" aria-label="Alchemy Modular Account V2 setup">
+        <div>
+          <span>04 / ERC-4337</span>
+          <h3>ISOLATED EXECUTION ACCOUNT</h3>
+          <p>MetaMask remains the treasury owner. This creates one additional Alchemy Modular Account V2 for the selected factory-verified Pons token and curve. No treasury key leaves MetaMask.</p>
+        </div>
+        <dl>
+          <div><dt>account type</dt><dd>SMA-B / MODULAR ACCOUNT V2</dd></div>
+          <div><dt>spending ceiling</dt><dd id="smart-account-cap">$30.00 + GAS RESERVE</dd></div>
+          <div><dt>session expiry</dt><dd>24 HOURS</dd></div>
+          <div><dt>contract actions</dt><dd>BUY · SELL · APPROVE</dd></div>
+          <div><dt>cancel / reprice</dt><dd>ORCHESTRATOR RE-QUOTES; NO PONS SELECTORS</dd></div>
+        </dl>
+        <div class="smart-account-actions">
+          <button type="button" id="setup-smart-account" disabled>CREATE + AUTHORIZE + FUND</button>
+          <button type="button" id="revoke-smart-account" disabled>DISABLE THIS APP'S SESSION</button>
+          <p id="smart-account-status" aria-live="polite">Loading ERC-4337 configuration…</p>
+          <a id="smart-account-link" hidden target="_blank" rel="noopener noreferrer">VIEW SMART ACCOUNT ↗</a>
+          <a id="smart-account-funding" hidden target="_blank" rel="noopener noreferrer">VIEW FUNDING ↗</a>
+        </div>
+      </article>
     </section>
 
     <section class="roadmap-panel" id="roadmap" aria-label="GPTHEIST product roadmap">
@@ -192,6 +213,7 @@
     <span id="updated">NOT YET SYNCED</span>
     <span>EXECUTION POLICY v1</span>
   </footer>
+  <script src="/smart-account.js" defer></script>
   <script src="/desk.js" defer></script>
 </body>
 </html>
