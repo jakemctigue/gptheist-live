@@ -314,6 +314,15 @@ export class SmartAccountCoordinator {
         : "Disable the current session or wait for its expiry before authorizing another target";
       throw new SmartAccountError("SESSION_ALREADY_ACTIVE", detail, 409);
     }
+    this.#prunePlans();
+    const pending = [...this.#plans.values()].find((candidate) => candidate.owner === owner);
+    if (pending) {
+      if (pending.token !== token || pending.curve !== curve) {
+        throw new SmartAccountError("SESSION_PLAN_ACTIVE", "Finish or wait for the current setup plan before selecting another target", 409);
+      }
+      const { smartAccount: _, ...existingPlan } = pending;
+      return existingPlan;
+    }
     const chain = rpcQuantity(await this.#rpc("eth_chainId"), "chain id");
     if (chain !== BigInt(ROBINHOOD_CHAIN_ID)) throw new SmartAccountError("CHAIN_MISMATCH", `RPC must report Robinhood Chain ${ROBINHOOD_CHAIN_ID}`, 502);
     const launchRaw = await this.#rpc("eth_call", [{
@@ -387,7 +396,6 @@ export class SmartAccountCoordinator {
       expiresAt: new Date(expirySec * 1_000).toISOString(),
       planExpiresAt: new Date(this.#now() + PLAN_TTL_MS).toISOString()
     };
-    this.#prunePlans();
     while (this.#plans.size >= MAX_EPHEMERAL_RECORDS) this.#plans.delete(this.#plans.keys().next().value as string);
     this.#plans.set(planId, plan);
     return plan;
@@ -470,6 +478,13 @@ export class SmartAccountCoordinator {
     const funded = transaction as Record<string, unknown>;
     if (normalizeAddress(funded.from, "funding sender") !== owner || normalizeAddress(funded.to, "funding recipient") !== account || rpcQuantity(funded.value, "funding value") !== BigInt(plan.totalFundingWei)) {
       throw new SmartAccountError("FUNDING_POLICY_MISMATCH", "funding transaction does not exactly match the treasury, smart account, and capped amount", 403);
+    }
+    const receipt = await this.#rpc("eth_getTransactionReceipt", [fundingTransactionHash]);
+    if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt) || (receipt as Record<string, unknown>).blockNumber == null) {
+      throw new SmartAccountError("FUNDING_NOT_CONFIRMED", "funding transaction is not mined yet; retry activation", 409);
+    }
+    if ((receipt as Record<string, unknown>).status !== "0x1") {
+      throw new SmartAccountError("FUNDING_FAILED", "funding transaction failed on Robinhood Chain", 409);
     }
     const grant: SmartAccountGrant = {
       _id: owner.toLowerCase(),

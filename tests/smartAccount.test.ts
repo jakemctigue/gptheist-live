@@ -65,6 +65,9 @@ function createHarness(): { coordinator: SmartAccountCoordinator; store: MemoryS
     if (method === "eth_getTransactionByHash") {
       return { from: owner, to: smartAccount, value: fundingValue };
     }
+    if (method === "eth_getTransactionReceipt") {
+      return { blockNumber: "0x123", status: "0x1" };
+    }
     throw new Error(`unexpected RPC method ${method}`);
   };
   const fetcher: typeof fetch = async (input, init) => {
@@ -118,6 +121,11 @@ test("builds a 24-hour MAv2 policy with no root or global-contract authority", a
   assert.deepEqual(plan.permissions.at(-2), { type: "functions-on-contract", data: { address: curve, functions: [PONS_BUY_SELECTOR, PONS_SELL_SELECTOR] } });
   assert.deepEqual(plan.permissions.at(-1), { type: "functions-on-contract", data: { address: token, functions: [ERC20_APPROVE_SELECTOR] } });
   assert.deepEqual(plan.unsupportedContractActions, ["cancel", "reprice"]);
+  assert.equal((await coordinator.createPlan(owner, token, curve)).planId, plan.planId);
+  await assert.rejects(
+    coordinator.createPlan(owner, token, "0x5555555555555555555555555555555555555555"),
+    (error: unknown) => error instanceof SmartAccountError && error.code === "SESSION_PLAN_ACTIVE"
+  );
 });
 
 test("proxies only the exact planned account and session requests, then persists and revokes the grant", async () => {

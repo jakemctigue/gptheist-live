@@ -52,6 +52,10 @@ async function setup(input: SetupInput): Promise<SetupResult> {
     throw new Error("Smart-account plan does not match the connected MetaMask owner or Robinhood Chain");
   }
   assertAddress(owner, "MetaMask owner");
+  const connected = await input.provider.request({ method: "eth_accounts" }) as unknown;
+  if (!Array.isArray(connected) || typeof connected[0] !== "string" || connected[0].toLowerCase() !== owner) {
+    throw new Error("MetaMask account changed; authenticate the current treasury again");
+  }
   const walletClient = createWalletClient({
     account: owner,
     chain: robinhoodChain,
@@ -93,7 +97,7 @@ async function setup(input: SetupInput): Promise<SetupResult> {
   });
   let activationResponse: Response | null = null;
   let activation: { error?: string; code?: string } = {};
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
     activationResponse = await fetch("/api/smart-account/activate", {
       method: "POST",
       credentials: "same-origin",
@@ -101,8 +105,8 @@ async function setup(input: SetupInput): Promise<SetupResult> {
       body: activationBody
     });
     activation = await activationResponse.json() as { error?: string; code?: string };
-    if (activationResponse.ok || activation.code !== "FUNDING_NOT_FOUND") break;
-    await new Promise((resolve) => setTimeout(resolve, 1_500 * (attempt + 1)));
+    if (activationResponse.ok || !["FUNDING_NOT_FOUND", "FUNDING_NOT_CONFIRMED"].includes(activation.code ?? "")) break;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
   }
   if (!activationResponse?.ok) throw new Error(`${activation.code ?? "ACTIVATION_FAILED"}: ${activation.error ?? `HTTP ${activationResponse?.status ?? 0}`}`);
   return { account: account.address, fundingTransactionHash, grant: activation };
