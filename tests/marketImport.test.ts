@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  configuredSolanaPrograms,
-  DEFAULT_SOLANA_PROGRAMS,
+  configuredSolanaMarkets,
+  DEFAULT_SOLANA_MARKETS,
+  EVM_MARKET_POOLS,
   EVM_MARKET_TOPICS,
   parseMarketImportArgs
 } from "../src/marketImport.js";
@@ -33,11 +34,12 @@ test("market import defaults to a bounded 48-hour cross-chain backfill", () => {
   assert.throws(() => parseMarketImportArgs(["--plan", "--follow"]), /cannot be combined/);
 });
 
-test("market filters cover common EVM swap shapes and configured Solana programs", () => {
+test("market filters cover common swap shapes and liquid ETH/SOL stablecoin pools", () => {
   assert.equal(Object.keys(EVM_MARKET_TOPICS).length, 6);
-  assert.equal(Object.keys(configuredSolanaPrograms({})).length, Object.keys(DEFAULT_SOLANA_PROGRAMS).length);
-  assert.deepEqual(configuredSolanaPrograms({ MARKET_SOLANA_PROGRAMS: "router:11111111111111111111111111111111" }), {
-    router: "11111111111111111111111111111111"
+  assert.equal(Object.keys(EVM_MARKET_POOLS).length, 5);
+  assert.equal(Object.keys(configuredSolanaMarkets({})).length, Object.keys(DEFAULT_SOLANA_MARKETS).length);
+  assert.deepEqual(configuredSolanaMarkets({ MARKET_SOLANA_MARKETS: "pool:11111111111111111111111111111111" }), {
+    pool: "11111111111111111111111111111111"
   });
-  assert.throws(() => configuredSolanaPrograms({ MARKET_SOLANA_PROGRAMS: "broken" }), /name:programId/);
+  assert.throws(() => configuredSolanaMarkets({ MARKET_SOLANA_MARKETS: "broken" }), /name:address/);
 });

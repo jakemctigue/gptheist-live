@@ -29,14 +29,25 @@ export const EVM_MARKET_TOPICS = Object.fromEntries(
   Object.entries(EVM_MARKET_EVENTS).map(([protocol, signature]) => [toEventSelector(signature), protocol])
 ) as Record<string, string>;
 
-export const DEFAULT_SOLANA_PROGRAMS = {
-  jupiter: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-  "raydium-amm-v4": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
-  "raydium-cpmm": "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
-  "raydium-clmm": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
-  "orca-whirlpool": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
-  "meteora-dlmm": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
+export const EVM_MARKET_POOLS = {
+  "uniswap-v3-weth-usdc-005": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+  "uniswap-v3-weth-usdc-030": "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8",
+  "uniswap-v2-weth-usdc": "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc",
+  "uniswap-v3-weth-usdt-030": "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36",
+  "uniswap-v2-weth-usdt": "0x0d4a11d5EEaac28EC3F61d100daF4d40471f1852"
 } as const;
+
+export const DEFAULT_SOLANA_MARKETS = {
+  "raydium-sol-usdc-amm": "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2",
+  "raydium-sol-usdc-clmm": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+  "orca-sol-usdc-whirlpool": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"
+} as const;
+
+const SOLANA_MARKET_PROGRAMS: Record<string, string> = {
+  "raydium-sol-usdc-amm": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+  "raydium-sol-usdc-clmm": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+  "orca-sol-usdc-whirlpool": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+};
 
 export interface MarketImportOptions {
   plan: boolean;
@@ -86,7 +97,7 @@ interface MarketTransaction extends JsonObject {
   transactionIndex: number | null;
   timestamp: Date;
   protocols: string[];
-  programIds?: string[];
+  marketAddresses?: string[];
   ingestionMode: IngestionMode;
   ingestionLagMs: number;
   firstIngestedAt: Date;
@@ -107,7 +118,7 @@ interface SolanaCheckpoint {
   _id: string;
   network: "solana";
   protocol: string;
-  programId: string;
+  marketAddress: string;
   since: Date;
   before?: string;
   newestSignature?: string;
@@ -203,16 +214,16 @@ function endpoint(network: MarketNetwork): string {
     : `https://solana-mainnet.g.alchemy.com/v2/${key}`;
 }
 
-export function configuredSolanaPrograms(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const raw = env.MARKET_SOLANA_PROGRAMS?.trim();
-  if (!raw) return { ...DEFAULT_SOLANA_PROGRAMS };
+export function configuredSolanaMarkets(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const raw = env.MARKET_SOLANA_MARKETS?.trim();
+  if (!raw) return { ...DEFAULT_SOLANA_MARKETS };
   const result: Record<string, string> = {};
   for (const entry of raw.split(",")) {
-    const [name, programId, extra] = entry.split(":").map((value) => value.trim());
-    if (!name || !programId || extra || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(programId)) {
-      throw new Error("MARKET_SOLANA_PROGRAMS must be comma-separated name:programId pairs");
+    const [name, marketAddress, extra] = entry.split(":").map((value) => value.trim());
+    if (!name || !marketAddress || extra || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(marketAddress)) {
+      throw new Error("MARKET_SOLANA_MARKETS must be comma-separated name:address pairs");
     }
-    result[name] = programId;
+    result[name] = marketAddress;
   }
   return result;
 }
@@ -338,6 +349,7 @@ async function evmLogs(rpc: JsonRpcClient, fromBlock: number, toBlock: number, d
     const result = await rpc.call("eth_getLogs", [{
       fromBlock: `0x${fromBlock.toString(16)}`,
       toBlock: `0x${toBlock.toString(16)}`,
+      address: Object.values(EVM_MARKET_POOLS),
       topics: [Object.keys(EVM_MARKET_TOPICS)]
     }]);
     if (!Array.isArray(result)) throw new Error("invalid eth_getLogs response");
@@ -482,7 +494,7 @@ async function importEthereum(
   if (chainId !== 1) throw new Error(`Ethereum endpoint returned chain id ${chainId}`);
   const head = hexNumber(await rpc.call("eth_blockNumber"), "eth_blockNumber");
   const endBlock = Math.max(1, head - options.ethereumConfirmations);
-  const checkpointId = "market:ethereum:v1";
+  const checkpointId = "market:ethereum:eth-usd:v2";
   const checkpoint = await checkpoints.findOne({ _id: checkpointId });
   const effectiveSince = checkpoint?.since ?? since;
   const startByTime = await firstEvmBlockAtOrAfter(rpc, endBlock, Math.floor(effectiveSince.getTime() / 1_000));
@@ -508,6 +520,7 @@ interface SolanaSignature {
   slot: number;
   blockTime: number | null;
   err: unknown;
+  sampleWeight?: number;
 }
 
 function solanaSignature(value: unknown): value is SolanaSignature {
@@ -515,12 +528,37 @@ function solanaSignature(value: unknown): value is SolanaSignature {
     (typeof value.blockTime === "number" || value.blockTime === null);
 }
 
+function sampleSolanaSignatures(entries: SolanaSignature[], perMinute = 20): SolanaSignature[] {
+  const groups = new Map<number, SolanaSignature[]>();
+  for (const entry of entries) {
+    if (entry.blockTime === null) continue;
+    const minute = Math.floor(entry.blockTime / 60);
+    const group = groups.get(minute) ?? [];
+    group.push(entry);
+    groups.set(minute, group);
+  }
+  return [...groups.values()].flatMap((group) => {
+    const selected = group.slice(0, perMinute);
+    const sampleWeight = group.length / selected.length;
+    return selected.map((entry) => ({ ...entry, sampleWeight }));
+  });
+}
+
+function solanaMarketSwap(protocol: string, logMessages: unknown): logMessages is string[] {
+  if (!Array.isArray(logMessages) || !logMessages.every((value) => typeof value === "string")) return false;
+  const program = SOLANA_MARKET_PROGRAMS[protocol];
+  if (!program || !logMessages.some((line) => line.includes(`Program ${program} invoke`))) return false;
+  return protocol === "raydium-sol-usdc-amm"
+    ? logMessages.some((line) => line.includes("ray_log:"))
+    : logMessages.some((line) => /Instruction: (Swap|SwapV2)\b/.test(line));
+}
+
 async function storeSolanaTransactions(
   rpc: JsonRpcClient,
   transactions: Collection<MarketTransaction>,
   signatures: SolanaSignature[],
   protocol: string,
-  programId: string,
+  marketAddress: string,
   mode: IngestionMode
 ): Promise<number> {
   let stored = 0;
@@ -541,6 +579,8 @@ async function storeSolanaTransactions(
       const timestamp = new Date(blockTime * 1_000);
       const meta = isObject(result.meta) ? result.meta : {};
       const transaction = isObject(result.transaction) ? result.transaction : {};
+      if (!solanaMarketSwap(protocol, meta.logMessages)) continue;
+      const relevantLogs = meta.logMessages.filter((line) => /ray_log:|Instruction: (Swap|SwapV2)\b|Program data:/.test(line));
       const documentId = `solana:${summary.signature}`;
       operations.push({ updateOne: {
         filter: { _id: documentId },
@@ -551,19 +591,17 @@ async function storeSolanaTransactions(
             success: meta.err === null,
             feeLamports: typeof meta.fee === "number" ? String(meta.fee) : null,
             computeUnitsConsumed: typeof meta.computeUnitsConsumed === "number" ? String(meta.computeUnitsConsumed) : null,
-            transaction,
-            innerInstructions: meta.innerInstructions ?? null,
-            logMessages: meta.logMessages ?? null,
+            message: isObject(transaction.message) ? transaction.message : null,
+            logMessages: relevantLogs,
             preTokenBalances: meta.preTokenBalances ?? null,
             postTokenBalances: meta.postTokenBalances ?? null,
-            preBalances: meta.preBalances ?? null,
-            postBalances: meta.postBalances ?? null,
+            sampleWeight: summary.sampleWeight ?? 1,
             ingestionMode: mode,
             ingestionLagMs: Math.max(0, now.getTime() - timestamp.getTime()),
             lastSeenAt: now
           },
           $setOnInsert: { firstIngestedAt: now },
-          $addToSet: { protocols: { $each: [protocol] }, programIds: { $each: [programId] } }
+          $addToSet: { protocols: { $each: [protocol] }, marketAddresses: { $each: [marketAddress] } }
         } as Document,
         upsert: true
       } });
@@ -580,9 +618,9 @@ async function backfillSolanaProgram(
   options: MarketImportOptions,
   since: Date,
   protocol: string,
-  programId: string
+  marketAddress: string
 ): Promise<void> {
-  const checkpointId = `market:solana:${programId}`;
+  const checkpointId = `market:solana:${marketAddress}`;
   let checkpoint = await checkpoints.findOne({ _id: checkpointId });
   if (checkpoint?.historyComplete) return;
   const effectiveSince = checkpoint?.since ?? since;
@@ -594,23 +632,24 @@ async function backfillSolanaProgram(
     if (options.maxSolanaPages !== undefined && page >= options.maxSolanaPages) break;
     const config: JsonObject = { limit: options.solanaPageSize, commitment: "finalized" };
     if (before) config.before = before;
-    const result = await rpc.call("getSignaturesForAddress", [programId, config]);
+    const result = await rpc.call("getSignaturesForAddress", [marketAddress, config]);
     if (!Array.isArray(result)) throw new Error(`Invalid signatures response for ${protocol}`);
     const entries = result.filter(solanaSignature);
     if (!newestSignature && entries[0]) newestSignature = entries[0].signature;
     const inRange = entries.filter((entry) => entry.blockTime !== null && entry.blockTime * 1_000 >= effectiveSince.getTime() && entry.err === null);
-    storedTransactions += await storeSolanaTransactions(rpc, transactions, [...inRange].reverse(), protocol, programId, "backfill");
+    const sampled = sampleSolanaSignatures(inRange);
+    storedTransactions += await storeSolanaTransactions(rpc, transactions, [...sampled].reverse(), protocol, marketAddress, "backfill");
     page += 1;
     const oldest = entries.at(-1);
     const complete = entries.length < options.solanaPageSize || !oldest || oldest.blockTime === null || oldest.blockTime * 1_000 < effectiveSince.getTime();
     before = oldest?.signature;
     await checkpoints.updateOne({ _id: checkpointId }, { $set: {
-      network: "solana", protocol, programId, since: effectiveSince,
+      network: "solana", protocol, marketAddress, since: effectiveSince,
       ...(before ? { before } : {}),
       ...(newestSignature ? { newestSignature } : {}),
       historyComplete: complete, storedTransactions, updatedAt: new Date()
     } }, { upsert: true });
-    process.stdout.write(`${JSON.stringify({ event: "solana-progress", protocol, page, signatures: entries.length, inRange: inRange.length, historyComplete: complete })}\n`);
+    process.stdout.write(`${JSON.stringify({ event: "solana-progress", protocol, page, signatures: entries.length, inRange: inRange.length, sampled: sampled.length, historyComplete: complete })}\n`);
     if (complete || entries.length === 0) break;
     checkpoint = await checkpoints.findOne({ _id: checkpointId });
     before = checkpoint?.before;
@@ -624,20 +663,21 @@ async function followSolanaProgram(
   options: MarketImportOptions,
   since: Date,
   protocol: string,
-  programId: string
+  marketAddress: string
 ): Promise<void> {
-  const checkpointId = `market:solana:${programId}`;
+  const checkpointId = `market:solana:${marketAddress}`;
   const checkpoint = await checkpoints.findOne({ _id: checkpointId });
   const effectiveSince = checkpoint?.since ?? since;
   const config: JsonObject = { limit: options.solanaPageSize, commitment: "finalized" };
   if (checkpoint?.newestSignature) config.until = checkpoint.newestSignature;
-  const result = await rpc.call("getSignaturesForAddress", [programId, config]);
+  const result = await rpc.call("getSignaturesForAddress", [marketAddress, config]);
   if (!Array.isArray(result)) throw new Error(`Invalid signatures response for ${protocol}`);
   const entries = result.filter(solanaSignature).filter((entry) => entry.err === null);
-  const added = await storeSolanaTransactions(rpc, transactions, [...entries].reverse(), protocol, programId, "follow");
+  const sampled = sampleSolanaSignatures(entries);
+  const added = await storeSolanaTransactions(rpc, transactions, [...sampled].reverse(), protocol, marketAddress, "follow");
   const newestSignature = entries[0]?.signature ?? checkpoint?.newestSignature;
   await checkpoints.updateOne({ _id: checkpointId }, { $set: {
-    network: "solana", protocol, programId, since: effectiveSince,
+    network: "solana", protocol, marketAddress, since: effectiveSince,
     ...(newestSignature ? { newestSignature } : {}),
     historyComplete: true,
     storedTransactions: (checkpoint?.storedTransactions ?? 0) + added, updatedAt: new Date()
@@ -664,7 +704,7 @@ function helpText(): string {
     "Environment:",
     "  ALCHEMY_API_KEY (required unless both RPC URLs are configured)",
     "  ETHEREUM_RPC_URL / SOLANA_RPC_URL (optional overrides)",
-    "  MARKET_SOLANA_PROGRAMS=name:programId,... (optional override)",
+    "  MARKET_SOLANA_MARKETS=name:address,... (optional pool override)",
     "  MONGODB_URI and GPTHEIST_MONGODB_DB"
   ].join("\n");
 }
@@ -683,18 +723,18 @@ export async function runMarketImport(args: string[]): Promise<void> {
   const since = new Date(Date.now() - options.hours * 60 * 60 * 1_000);
   const ethereumRpc = options.networks.includes("ethereum") ? new JsonRpcClient(endpoint("ethereum"), "Ethereum") : null;
   const solanaRpc = options.networks.includes("solana") ? new JsonRpcClient(endpoint("solana"), "Solana") : null;
-  const programs = configuredSolanaPrograms();
+  const markets = configuredSolanaMarkets();
   const plan: JsonObject = { event: "market-import-plan", since: since.toISOString(), networks: options.networks };
   if (ethereumRpc) {
     const chainId = hexNumber(await ethereumRpc.call("eth_chainId"), "eth_chainId");
     const head = hexNumber(await ethereumRpc.call("eth_blockNumber"), "eth_blockNumber");
     const endBlock = Math.max(1, head - options.ethereumConfirmations);
     const startBlock = await firstEvmBlockAtOrAfter(ethereumRpc, endBlock, Math.floor(since.getTime() / 1_000));
-    plan.ethereum = { chainId, startBlock, endBlock, blocks: endBlock - startBlock + 1, eventTopics: Object.keys(EVM_MARKET_TOPICS).length };
+    plan.ethereum = { chainId, startBlock, endBlock, blocks: endBlock - startBlock + 1, pools: Object.keys(EVM_MARKET_POOLS).length, eventTopics: Object.keys(EVM_MARKET_TOPICS).length };
   }
   if (solanaRpc) {
     const slot = await solanaRpc.call("getSlot", [{ commitment: "finalized" }]);
-    plan.solana = { slot, programs: Object.keys(programs).length };
+    plan.solana = { slot, markets: Object.keys(markets).length };
   }
   process.stdout.write(`${JSON.stringify(plan)}\n`);
   if (options.plan) return;
@@ -716,9 +756,9 @@ export async function runMarketImport(args: string[]): Promise<void> {
     const solanaCheckpoints = database.collection<SolanaCheckpoint>("market_ingestion_checkpoints");
     const importSolana = async (): Promise<void> => {
       if (!solanaRpc) return;
-      for (const [protocol, programId] of Object.entries(programs)) {
+      for (const [protocol, marketAddress] of Object.entries(markets)) {
         if (interrupted) break;
-        await backfillSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, programId);
+        await backfillSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, marketAddress);
       }
     };
     await Promise.all([
@@ -728,9 +768,9 @@ export async function runMarketImport(args: string[]): Promise<void> {
     while (options.follow && !interrupted) {
       const followSolana = async (): Promise<void> => {
         if (!solanaRpc) return;
-        for (const [protocol, programId] of Object.entries(programs)) {
+        for (const [protocol, marketAddress] of Object.entries(markets)) {
           if (interrupted) break;
-          await followSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, programId);
+          await followSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, marketAddress);
         }
       };
       await Promise.all([
