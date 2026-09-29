@@ -8,6 +8,7 @@ import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv
 import { normalizedWallet, WalletAuth, WalletAuthError } from "./walletAuth.js";
 import { aiProviderConfigFromEnv, publicAiProviderStatus, type AiProviderConfig } from "./providerConfig.js";
 import { SmartAccountCoordinator, SmartAccountError } from "./smartAccount.js";
+import { readPaperTradingStatus } from "./paperTrading.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
@@ -421,6 +422,14 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
       }
       if (path === "/health") {
         send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-authenticated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled, smartAccounts: smartAccounts.publicConfiguration().enabled, providers: publicAiProviderStatus(aiProviders) }));
+        return;
+      }
+      if (path === "/api/paper-trading") {
+        try {
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(await readPaperTradingStatus()), { "cache-control": "no-store" });
+        } catch {
+          send(response, 503, "application/json; charset=utf-8", JSON.stringify({ error: "paper-trading status unavailable", mode: "paper-only" }), { "cache-control": "no-store" });
+        }
         return;
       }
       if (path === "/api/smart-account/config") {
