@@ -251,27 +251,61 @@ class JsonRpcClient {
 
   async call(method: string, params: unknown[] = []): Promise<unknown> {
     const id = this.#nextId++;
-    const payload = await this.post({ jsonrpc: "2.0", id, method, params });
-    if (!isObject(payload)) throw new Error(`${this.label} returned an invalid response for ${method}`);
-    const envelope = payload as unknown as RpcEnvelope;
-    if (envelope.error) throw new Error(`${this.label} ${method}: ${envelope.error.message ?? String(envelope.error.code ?? "error")}`);
-    return envelope.result;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+      const payload = await this.post({ jsonrpc: "2.0", id, method, params });
+      if (!isObject(payload)) throw new Error(`${this.label} returned an invalid response for ${method}`);
+      const envelope = payload as unknown as RpcEnvelope;
+      if (!envelope.error) return envelope.result;
+      const message = envelope.error.message ?? String(envelope.error.code ?? "error");
+      if (!retryableRpcError(message) || attempt === MAX_RETRIES - 1) throw new Error(`${this.label} ${method}: ${message}`);
+      await delay(Math.min(10_000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
+    }
+    throw new Error(`${this.label} ${method}: retry budget exhausted`);
   }
 
   async batch(requests: { method: string; params: unknown[] }[]): Promise<unknown[]> {
     if (requests.length === 0) return [];
     const bodies = requests.map((request) => ({ jsonrpc: "2.0", id: this.#nextId++, ...request }));
-    const payload = await this.post(bodies);
-    if (!Array.isArray(payload)) throw new Error(`${this.label} returned an invalid batch response`);
-    const byId = new Map<number, RpcEnvelope>();
-    for (const item of payload) if (isObject(item) && typeof item.id === "number") byId.set(item.id, item as unknown as RpcEnvelope);
-    return bodies.map((body) => {
-      const response = byId.get(body.id);
-      if (!response) throw new Error(`${this.label} omitted batch response ${body.id}`);
-      if (response.error) throw new Error(`${this.label} ${body.method}: ${response.error.message ?? "RPC error"}`);
-      return response.result;
-    });
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+      const payload = await this.post(bodies);
+      if (!Array.isArray(payload)) throw new Error(`${this.label} returned an invalid batch response`);
+      const byId = new Map<number, RpcEnvelope>();
+      for (const item of payload) if (isObject(item) && typeof item.id === "number") byId.set(item.id, item as unknown as RpcEnvelope);
+      const ordered = bodies.map((body) => {
+        const response = byId.get(body.id);
+        if (!response) throw new Error(`${this.label} omitted batch response ${body.id}`);
+        return { body, response };
+      });
+      const retryable = ordered.some(({ response }) => response.error && retryableRpcError(response.error.message ?? String(response.error.code ?? "error")));
+      if (retryable && attempt < MAX_RETRIES - 1) {
+        await delay(Math.min(10_000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
+        continue;
+      }
+      return ordered.map(({ body, response }) => {
+        if (response.error) throw new Error(`${this.label} ${body.method}: ${response.error.message ?? "RPC error"}`);
+        return response.result;
+      });
+    }
+    throw new Error(`${this.label} batch: retry budget exhausted`);
   }
+}
+
+function retryableRpcError(message: string): boolean {
+  return /compute units per second|rate limit|too many requests|throughput|\b429\b/i.test(message);
+}
+
+async function mapConcurrent<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      const item = items[index];
+      if (item !== undefined) results[index] = await worker(item);
+    }
+  }));
+  return results;
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -370,7 +404,7 @@ async function storeEvmRange(
     list.push(log);
     logsByBlock.set(blockNumber, list);
   }
-  const storedByBlock = await Promise.all([...logsByBlock.keys()].sort((left, right) => left - right).map(async (blockNumber) => {
+  const storedByBlock = await mapConcurrent([...logsByBlock.keys()].sort((left, right) => left - right), 3, async (blockNumber) => {
     const block = await evmBlock(rpc, blockNumber, true);
     const txs = transactionByHash(block);
     const blockLogs = logsByBlock.get(blockNumber) ?? [];
@@ -432,7 +466,7 @@ async function storeEvmRange(
       } });
     }
     return operations.length > 0 ? (await transactions.bulkWrite(operations, { ordered: false })).upsertedCount : 0;
-  }));
+  });
   return storedByBlock.reduce((total, count) => total + count, 0);
 }
 
