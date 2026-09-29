@@ -58,11 +58,21 @@ export interface PaperLedger {
   policy: { stakeWei: string; maxOpenPositions: number; minScore: number; takeProfitBps: number; stopLossBps: number; maxHoldMs: number; gasUnitsPerTrade: string };
   positions: PaperPosition[];
   seenTokens: string[];
+  /** Cumulative totals for closed positions trimmed from `positions`. */
+  archived?: PaperArchive;
   skippedAtCapacity: number;
   cycles: number;
   lastCycleAt: string | null;
   lastBlock: number | null;
   lastError: string | null;
+}
+
+export interface PaperArchive {
+  closed: number;
+  wins: number;
+  realizedPnlWei: string;
+  deployedWei: string;
+  exitReasons: Record<PaperExitReason, number>;
 }
 
 export interface PaperReport {
@@ -266,10 +276,13 @@ export async function runPaperCycle(rpc: RpcCaller, ledger: PaperLedger, policy:
   }
 
   const closed = positions.filter((position) => position.status === "CLOSED");
-  const keptClosed = closed.slice(Math.max(0, closed.length - MAX_CLOSED_POSITIONS));
+  const trimCount = Math.max(0, closed.length - MAX_CLOSED_POSITIONS);
+  const keptClosed = closed.slice(trimCount);
+  const archived = archiveClosed(ledger.archived, closed.slice(0, trimCount));
   return {
     ...ledger,
     positions: [...keptClosed, ...positions.filter((position) => position.status === "OPEN")],
+    ...(archived ? { archived } : {}),
     seenTokens,
     skippedAtCapacity,
     cycles: ledger.cycles + 1,
@@ -279,15 +292,30 @@ export async function runPaperCycle(rpc: RpcCaller, ledger: PaperLedger, policy:
   };
 }
 
+function archiveClosed(archive: PaperArchive | undefined, trimmed: PaperPosition[]): PaperArchive | undefined {
+  if (trimmed.length === 0) return archive;
+  const exitReasons: Record<PaperExitReason, number> = { TAKE_PROFIT: 0, STOP_LOSS: 0, MAX_HOLD: 0, LEFT_CURVE: 0, ...archive?.exitReasons };
+  for (const position of trimmed) if (position.exitReason) exitReasons[position.exitReason] += 1;
+  return {
+    closed: (archive?.closed ?? 0) + trimmed.length,
+    wins: (archive?.wins ?? 0) + trimmed.filter((position) => BigInt(position.pnlWei ?? "0") > 0n).length,
+    realizedPnlWei: trimmed.reduce((sum, position) => sum + BigInt(position.pnlWei ?? "0"), BigInt(archive?.realizedPnlWei ?? "0")).toString(),
+    deployedWei: trimmed.reduce((sum, position) => sum + BigInt(position.stakeWei), BigInt(archive?.deployedWei ?? "0")).toString(),
+    exitReasons
+  };
+}
+
 export function paperReport(ledger: PaperLedger): PaperReport {
-  const closed = ledger.positions.filter((position) => position.status === "CLOSED");
+  const archived = ledger.archived;
+  const closedPositions = ledger.positions.filter((position) => position.status === "CLOSED");
   const open = ledger.positions.filter((position) => position.status === "OPEN");
-  const realized = closed.reduce((sum, position) => sum + BigInt(position.pnlWei ?? "0"), 0n);
+  const closedCount = closedPositions.length + (archived?.closed ?? 0);
+  const realized = closedPositions.reduce((sum, position) => sum + BigInt(position.pnlWei ?? "0"), BigInt(archived?.realizedPnlWei ?? "0"));
   const unrealized = open.reduce((sum, position) => sum + pnlWei(position, BigInt(position.markWei)), 0n);
-  const deployed = ledger.positions.reduce((sum, position) => sum + BigInt(position.stakeWei), 0n);
-  const wins = closed.filter((position) => BigInt(position.pnlWei ?? "0") > 0n).length;
-  const exitReasons: Record<PaperExitReason, number> = { TAKE_PROFIT: 0, STOP_LOSS: 0, MAX_HOLD: 0, LEFT_CURVE: 0 };
-  for (const position of closed) if (position.exitReason) exitReasons[position.exitReason] += 1;
+  const deployed = ledger.positions.reduce((sum, position) => sum + BigInt(position.stakeWei), BigInt(archived?.deployedWei ?? "0"));
+  const wins = closedPositions.filter((position) => BigInt(position.pnlWei ?? "0") > 0n).length + (archived?.wins ?? 0);
+  const exitReasons: Record<PaperExitReason, number> = { TAKE_PROFIT: 0, STOP_LOSS: 0, MAX_HOLD: 0, LEFT_CURVE: 0, ...archived?.exitReasons };
+  for (const position of closedPositions) if (position.exitReason) exitReasons[position.exitReason] += 1;
   const total = realized + unrealized;
   return {
     mode: "paper-only",
@@ -297,12 +325,12 @@ export function paperReport(ledger: PaperLedger): PaperReport {
     cycles: ledger.cycles,
     lastError: ledger.lastError,
     stakeWei: ledger.policy.stakeWei,
-    opened: ledger.positions.length,
+    opened: ledger.positions.length + (archived?.closed ?? 0),
     open: open.length,
-    closed: closed.length,
+    closed: closedCount,
     wins,
-    losses: closed.length - wins,
-    winRateBps: closed.length === 0 ? null : Math.round((wins * 10_000) / closed.length),
+    losses: closedCount - wins,
+    winRateBps: closedCount === 0 ? null : Math.round((wins * 10_000) / closedCount),
     skippedAtCapacity: ledger.skippedAtCapacity,
     realizedPnlWei: realized.toString(),
     unrealizedPnlWei: unrealized.toString(),
