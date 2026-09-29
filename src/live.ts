@@ -156,7 +156,7 @@ function isRpcLog(value: unknown): value is RpcLog {
     typeof log.data === "string";
 }
 
-export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?: number } = {}): Promise<LiveSnapshot> {
+export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?: number; retainedLaunches?: LiveLaunch[] } = {}): Promise<LiveSnapshot> {
   const chainHex = await rpc("eth_chainId");
   if (typeof chainHex !== "string" || parseHexInteger(chainHex) !== ROBINHOOD_CHAIN_ID) {
     throw new Error("RPC is not Robinhood Chain mainnet (chain id 4663)");
@@ -192,6 +192,13 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
   const allLaunches = rawLogs.filter(isRpcLog).map(decodeTokenLaunchedLog).filter((launch): launch is LiveLaunch => launch !== null)
     .sort((a, b) => b.blockNumber - a.blockNumber || b.logIndex - a.logIndex);
   const decodedLaunches = allLaunches.slice(0, 24);
+  const knownTokens = new Set(decodedLaunches.map((launch) => launch.token));
+  for (const launch of (options.retainedLaunches ?? []).slice(0, 24)) {
+    if (!knownTokens.has(launch.token) && launch.blockNumber <= headBlock) {
+      decodedLaunches.push(launch);
+      knownTokens.add(launch.token);
+    }
+  }
   const research = await readPonsLaunchResearch(rpc, decodedLaunches, headHex);
   const launches = decodedLaunches.map((launch, index): LiveLaunchDecision => {
     const market = research[index]?.market ?? { status: "UNAVAILABLE", reason: "market evidence missing" };

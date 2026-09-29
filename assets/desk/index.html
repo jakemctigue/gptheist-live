@@ -129,6 +129,43 @@
       </div>
     </section>
 
+    <section class="monitor-panel" id="monitor" aria-labelledby="monitor-title">
+      <div class="section-head">
+        <div><span>LIVE PRICE + RESERVE OBSERVATIONS</span><h2 id="monitor-title">OPPORTUNITY MONITOR</h2></div>
+        <b id="monitor-status" role="status">CONNECTING</b>
+      </div>
+      <p class="monitor-intro">Ranked entry reviews and exit warnings from live Pons curves. Every trade needs your approval. Scores describe the measured evidence, not the chance of profit.</p>
+      <div class="monitor-layout">
+        <div class="monitor-list-panel">
+          <label for="monitor-filter">SHOW</label>
+          <select id="monitor-filter"><option value="ALL">All observed tokens</option><option value="ENTRY_REVIEW">Entry reviews</option><option value="EXIT_REVIEW">Exit reviews</option></select>
+          <div id="monitor-list" class="monitor-list"><p>Waiting for the live feed…</p></div>
+        </div>
+        <article class="monitor-detail" aria-label="Selected opportunity">
+          <div class="monitor-identity"><h3 id="monitor-token">SELECT A TOKEN</h3><b id="monitor-signal">WARMING UP</b></div>
+          <p id="monitor-observation">At least 60 seconds of observations are needed for a proposal.</p>
+          <svg id="monitor-chart" viewBox="0 0 640 150" role="img" aria-label="Relative reserve price history"></svg>
+          <p class="monitor-chart-caption">Relative reserve price: first observation = 100. This is not an executable quote.</p>
+          <dl class="monitor-metrics">
+            <div><dt>1-minute price</dt><dd id="monitor-momentum">—</dd></div>
+            <div><dt>1-minute reserves</dt><dd id="monitor-liquidity">—</dd></div>
+            <div><dt>From observed high</dt><dd id="monitor-drawdown">—</dd></div>
+          </dl>
+          <ul id="monitor-reasons"><li>Collecting on-chain evidence.</li></ul>
+          <dl class="monitor-levels">
+            <div><dt>Entry review zone</dt><dd id="monitor-entry">—</dd></div>
+            <div><dt>Entry invalidation</dt><dd id="monitor-stop">—</dd></div>
+            <div><dt>Profit review (+15% from now)</dt><dd id="monitor-target">—</dd></div>
+            <div><dt>Trailing review (6% below high)</dt><dd id="monitor-trailing">—</dd></div>
+          </dl>
+          <p class="monitor-chart-caption">Levels are relative price indices and exclude fees, price impact, and gas. Exit reviews apply only if you hold the token. No holdings or fills are assumed.</p>
+          <div class="monitor-actions"><button id="monitor-buy" type="button" disabled>REVIEW BUY</button><button id="monitor-sell" type="button" disabled>REVIEW SELL IF HELD</button></div>
+          <p id="monitor-review-status" role="status">Choose an opportunity to inspect its evidence.</p>
+        </article>
+      </div>
+      <details class="monitor-method"><summary>Coverage and signal criteria</summary><p>Robinhood Chain, native-ETH Pons bonding curves only. The latest 24 launches plus up to 24 carried-forward launches are sampled while the server runs. History is held in memory for 15 minutes and rebuilds after restarts; carried-forward coverage lasts up to one hour. The background feed refreshes every 15 seconds, with additional refreshes while the Desk is open.</p><p>Entry: venue score passes, 1-minute price gain of 1–12%, growing real reserves, price 1–8% above the observed 5-minute low, combined score at least 75. Exit review: 6% pullback from the observed high, 4% 1-minute fall, or 5% reserve decline. Invalidation is 4% below the observed low. Stale data after 45 seconds, unavailable evidence, and unsupported venues suppress entry review. These are transparent, unvalidated screening rules; no model predicts a guaranteed bottom or top.</p></details>
+    </section>
+
     <section class="trade-panel" id="trade" aria-label="Wallet-gated Pons trade preparation">
       <div class="section-head">
         <div><span>SELECTED TARGET / TREASURY + SESSION AUTHORITY</span><h2>EXECUTION GATES</h2></div>
@@ -138,6 +175,7 @@
         <article class="trade-controls">
           <span>01 / INTENT</span>
           <h3>DEFINE THE TRADE</h3>
+          <p id="trade-target">Select a token to review.</p>
           <button type="button" id="connect-wallet">AUTHENTICATE METAMASK</button>
           <p id="wallet-status">MetaMask authorization required. Ledger and Trezor accounts are supported through MetaMask.</p>
           <label>SIDE<select id="trade-side"><option value="BUY">BUY WITH ETH</option><option value="SELL">SELL TOKEN</option></select></label>
@@ -215,5 +253,6 @@
   </footer>
   <script src="/smart-account.js" defer></script>
   <script src="/desk.js" defer></script>
+  <script src="/monitor.js" defer></script>
 </body>
 </html>
