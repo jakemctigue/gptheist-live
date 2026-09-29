@@ -112,7 +112,7 @@ function liveHandoffs(launch: LiveLaunch, market: PonsMarketState, assessment: P
   const verified = market.status === "VERIFIED";
   const entries: Array<[AgentOutcome, string]> = [
     ["INFO", `Detected Pons v2 launch in block ${launch.blockNumber}.`],
-    ["INFO", "Policy locked: observe verified factory events; only a gated browser wallet can submit."],
+    ["INFO", "Policy locked: observe verified factory events; quotes for the Alchemy session stay unsigned."],
     [verified ? "PASS" : "VETO", verified
       ? `Curve state verified: ${market.progressBps / 100}% to graduation; current snipe tax ${market.currentSnipeTaxBps / 100}%.`
       : `Market state unavailable: ${market.reason}`],

@@ -11,7 +11,7 @@ import { assessPonsLaunch } from "./market.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const BPS = 10_000n;
-const TRADE_ACKNOWLEDGEMENT = "I UNDERSTAND THIS SUBMITS A REAL TRADE";
+const TRADE_ACKNOWLEDGEMENT = "I UNDERSTAND THIS PREPARES AN UNSIGNED QUOTE";
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DECIMAL_AMOUNT = /^(?:0|[1-9][0-9]{0,59})(?:\.[0-9]{1,36})?$/;
 
@@ -56,7 +56,7 @@ export interface PublicTradePolicy {
   maxTotalFeeBps: number;
   minBuyScore: number;
   maxQuoteAgeBlocks: number;
-  signing: "browser wallet only";
+  signing: "alchemy-session-unsigned";
 }
 
 export interface TradeRequest {
@@ -163,7 +163,7 @@ export function publicTradePolicy(policy: TradePolicy): PublicTradePolicy {
     maxTotalFeeBps: policy.maxTotalFeeBps,
     minBuyScore: policy.minBuyScore,
     maxQuoteAgeBlocks: policy.maxQuoteAgeBlocks,
-    signing: "browser wallet only"
+    signing: "alchemy-session-unsigned"
   };
 }
 
@@ -226,7 +226,7 @@ export async function preparePonsTrade(rpc: RpcCaller, input: TradeRequest, poli
   const wallet = normalizedAddress(input.wallet, "wallet");
   const gates: TradeGateResult[] = [
     { id: "SERVER_ENABLED", passed: true, detail: "Live trading is enabled by server policy" },
-    { id: "HUMAN_ACKNOWLEDGED", passed: true, detail: "The irreversible-trade acknowledgement matched" }
+    { id: "HUMAN_ACKNOWLEDGED", passed: true, detail: "The unsigned-quote acknowledgement matched. Nothing is signed or submitted." }
   ];
 
   const chainHex = await rpc("eth_chainId");
@@ -386,7 +386,7 @@ export async function preparePonsTrade(rpc: RpcCaller, input: TradeRequest, poli
   gates.push(
     { id: "SIMULATION", passed: true, detail: "Pinned-block eth_call completed without a contract revert" },
     { id: "GAS_BALANCE", passed: true, detail: "Wallet balance covers trade value and a 20% gas-cost buffer" },
-    { id: "WALLET_APPROVAL", passed: true, detail: "The browser wallet must still display and approve the transaction" }
+    { id: "WALLET_APPROVAL", passed: true, detail: "Quote is bound to the Alchemy session and is not signed or broadcast" }
   );
 
   const preparedAt = new Date().toISOString();

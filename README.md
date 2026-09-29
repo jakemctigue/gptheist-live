@@ -16,9 +16,9 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-f4efe6">
 </p>
 
-GPTHEIST is a Robinhood Chain launch desk plus a deterministic market-replay CLI inspired by the ten-agent operating system described by [@immortalhowwl](https://x.com/immortalhowwl). Every Pons factory launch crosses ten visible evidence stages. Palermo can veto a trade before the Desk prepares an unsigned Pons v2 curve transaction for the user's browser wallet.
+GPTHEIST is a Robinhood Chain launch desk plus a deterministic market-replay CLI inspired by the ten-agent operating system described by [@immortalhowwl](https://x.com/immortalhowwl). Every Pons factory launch crosses ten visible evidence stages. Palermo can veto a trade before the Desk prepares an unsigned Pons v2 curve quote for the configured Alchemy session.
 
-The MetaMask treasury key never reaches the server. When the optional ERC-4337 path is enabled, the server holds only a separate orchestrator session key whose Alchemy Modular Account V2 authorization is limited to one factory-verified Pons token/curve pair, named function selectors, a $30 native-token allowance, cumulative gas, backend slippage/fee checks, and a 24-hour expiry. Direct treasury trades still require a separate click and approval in the connected EIP-1193 browser wallet.
+The Desk does not ask for a browser wallet. The Alchemy orchestrator session address is the wallet identity. Quotes are prepared for that address and are not signed or broadcast. The session key stays in the secret manager and is never sent to the browser.
 
 <p align="center">
   <img src="./assets/desk.png" alt="GPTHEIST Desk showing live Robinhood Chain launches and a Palermo veto" width="100%">
@@ -108,7 +108,7 @@ railway variables set TRADE_MIN_BUY_SCORE=70
 railway variables set TRADE_MAX_QUOTE_AGE_BLOCKS=300
 ```
 
-`TRADE_MAX_BUY_WEI` defaults to 0.05 ETH. There is no wallet-relative percentage cap. Slippage defaults to 3%, estimated price impact to 5%, total curve fee plus tax to 5%, the buy score to 70/100, and quote validity to 300 blocks. Sells must fit the connected wallet's token balance. The direct-trade path returns calldata only after `eth_call` and gas estimation pass; its `eth_sendTransaction` exists only in the browser and always opens the wallet's approval screen.
+`TRADE_MAX_BUY_WEI` defaults to 0.05 ETH. There is no wallet-relative percentage cap. Slippage defaults to 3%, estimated price impact to 5%, total curve fee plus tax to 5%, the buy score to 70/100, and quote validity to 300 blocks. Sells must fit the Alchemy session's token balance. A prepared quote returns calldata only after `eth_call` and gas estimation pass. The Desk does not submit that calldata.
 
 ### Isolated ERC-4337 execution account
 
@@ -121,7 +121,7 @@ railway variables set SMART_ACCOUNT_MAX_GAS_UNITS=700000
 railway variables set SMART_ACCOUNT_MAX_FEE_PER_GAS_WEI=1000000000
 ```
 
-The authenticated MetaMask account remains the owner and treasury. Setup requests a separate `sma-b` account, grants one 24-hour session to the configured session-key address, and asks MetaMask to fund the counterfactual address with the current Alchemy-priced ETH equivalent of exactly $30 plus the bounded gas reserve. The grant uses only `buy(uint256,uint256,address)` and `sell(uint256,uint256,address)` on the factory-verified curve plus `approve(address,uint256)` on its token; Pons exposes no cancel or reprice selector, so those behaviors mean discarding an old quote and preparing a new one. Newly launched curves require a new owner authorization rather than receiving global selector authority.
+The configured Alchemy session address is the wallet. The Desk shows that address and prepares unsigned quotes for it. It does not open a browser extension, request a signature, or fund an account. Modular Account permissions, when present, stay limited to one factory-verified Pons token/curve pair, named function selectors, a $30 native-token allowance, cumulative gas, backend slippage/fee checks, and a 24-hour expiry. The grant uses only `buy(uint256,uint256,address)` and `sell(uint256,uint256,address)` on the factory-verified curve plus `approve(address,uint256)` on its token. Pons exposes no cancel or reprice selector, so those behaviors mean discarding an old quote and preparing a new one.
 
 The usable permission context is persisted in MongoDB so restarts retain it. Disabling it in the Desk destroys that context in MongoDB immediately, which stops this application from using the session key. Wallet APIs v5 does not expose an owner-side revoke action, so this control is not an on-chain uninstall: the on-chain authorization independently expires after 24 hours, and the Desk will not create another grant before then. The initial funding transaction does not deploy the counterfactual account—the first valid ERC-4337 UserOperation does.
 
@@ -206,7 +206,7 @@ These thresholds are demonstration rules, not trading advice or validated predic
 - not a backtesting engine or profit calculator;
 - not yet an autonomous ERC-4337 trade executor; this change creates and persists the restricted account session but does not submit strategy trades with it;
 - not a treasury-key custodian, exchange, or broker;
-- not able to bypass the configured gates or approve a MetaMask prompt.
+- not able to bypass the configured gates or sign a quote in the browser.
 
 The Desk verifies factory provenance and reads each launch's current Pons state at the same snapshot block. A deterministic score can place supported ETH launches on the **WATCH** list; unsupported pairs, unsafe taxes, completed/rescued curves, malformed evidence, and unavailable reads receive an explicit **VETO**. A WATCH result is only one input to the stricter execution policy and is never a promise of market quality.
 
@@ -225,7 +225,7 @@ Direct runtime dependencies are `@alchemy/wallet-apis` for the owner-authorized 
 
 ## Safety
 
-Never put treasury keys into fixtures or server variables. If the optional ERC-4337 path is enabled, keep its dedicated session key only in a secret manager such as Railway variables; never reuse it for the treasury or another account. Direct live transactions are handed to the browser wallet only after all server gates pass. Pons v2 currently reports that its independent audits are still in progress; treat the contracts and launch tokens as experimental and verify the token address and wallet transaction before signing.
+Never put treasury keys into fixtures or server variables. Keep the Alchemy session key only in a secret manager such as Railway variables. Prepared quotes stay unsigned. Pons v2 currently reports that its independent audits are still in progress; treat the contracts and launch tokens as experimental and verify the token address before treating a quote as a trade.
 
 ## License
 

@@ -6,6 +6,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createDeskServer, createHttpRpcCaller } from "../src/server.js";
 import { TOKEN_LAUNCHED_TOPIC } from "../src/live.js";
 import { aiProviderConfigFromEnv } from "../src/providerConfig.js";
+import { SmartAccountCoordinator } from "../src/smartAccount.js";
 
 const word = (value: string): string => value.replace(/^0x/, "").padStart(64, "0");
 const topic = (value: string): `0x${string}` => `0x${word(value)}`;
@@ -81,7 +82,7 @@ test("Desk exposes bounded read-only X profile research without arbitrary outbou
   assert.equal((await fetch(`${base}/api/social?handle=https://evil.example`)).status, 400);
 });
 
-test("Desk authenticates a MetaMask-compatible wallet signature and gates trade preparation", async (t) => {
+test("Desk keeps signed-challenge APIs and requires the Alchemy session before a quote", async (t) => {
   const account = privateKeyToAccount(`0x${"33".repeat(32)}`);
   const server = createDeskServer({ rpc: fakeRpc });
   server.listen(0, "127.0.0.1");
@@ -92,7 +93,10 @@ test("Desk authenticates a MetaMask-compatible wallet signature and gates trade 
 
   const unauthorized = await fetch(`${base}/api/trade/prepare`, { method: "POST", headers, body: "{}" });
   assert.equal(unauthorized.status, 401);
-  assert.equal((await unauthorized.json() as { code: string }).code, "AUTH_REQUIRED");
+  assert.equal((await unauthorized.json() as { code: string }).code, "SESSION_REQUIRED");
+  const status = await fetch(`${base}/api/smart-account/status`);
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), { grant: null, account: { kind: "unconfigured", address: null } });
 
   const crossOrigin = await fetch(`${base}/api/auth/challenge`, {
     method: "POST",
@@ -130,6 +134,40 @@ test("Desk authenticates a MetaMask-compatible wallet signature and gates trade 
   assert.deepEqual(await expiredSession.json(), { authenticated: false });
 });
 
+test("trade preparation accepts only the configured Alchemy session and does not broadcast", async (t) => {
+  const sessionKey = `0x${"11".repeat(32)}` as const;
+  const sessionAccount = privateKeyToAccount(sessionKey);
+  const smartAccounts = new SmartAccountCoordinator({
+    rpc: fakeRpc,
+    env: { ALCHEMY_API_KEY: "test-key", ORCHESTRATOR_SESSION_PRIVATE_KEY: sessionKey }
+  });
+  const server = createDeskServer({ rpc: fakeRpc, smartAccounts });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const headers = { origin: base, accept: "application/json", "content-type": "application/json" };
+
+  const auth = await fetch(`${base}/api/auth/session`);
+  assert.deepEqual(await auth.json(), { authenticated: true, wallet: sessionAccount.address, provider: "alchemy-session" });
+
+  const mismatch = await fetch(`${base}/api/trade/prepare`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ wallet: "0x0000000000000000000000000000000000000001" })
+  });
+  assert.equal(mismatch.status, 403);
+  assert.equal((await mismatch.json() as { code: string }).code, "AUTH_WALLET_MISMATCH");
+
+  const matched = await fetch(`${base}/api/trade/prepare`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ wallet: sessionAccount.address })
+  });
+  assert.equal(matched.status, 403);
+  assert.equal((await matched.json() as { code: string }).code, "TRADING_DISABLED");
+});
+
 test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot with defensive headers", async (t) => {
   const server = createDeskServer({ rpc: fakeRpc, aiProviders: aiProviderConfigFromEnv({}) });
   server.listen(0, "127.0.0.1");
@@ -154,8 +192,9 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
   assert.match(productHtml, /TARGET DOSSIER/);
   assert.match(productHtml, /SOCIAL FOOTPRINT/);
   assert.match(productHtml, /EXECUTION GATES/);
-  assert.match(productHtml, /AUTHENTICATE METAMASK/);
-  assert.match(productHtml, /Ledger and Trezor accounts are supported through MetaMask/);
+  assert.match(productHtml, /ALCHEMY SESSION/);
+  assert.match(productHtml, /QUOTE STAYS UNSIGNED/);
+  assert.doesNotMatch(productHtml, /MetaMask|AUTHENTICATE METAMASK|smart-account\.js/);
   assert.match(productHtml, /DEPLOYER RECORD/);
   assert.match(productHtml, /LIQUIDITY STATE/);
   assert.match(productHtml, /ROADMAP/);
@@ -185,14 +224,10 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
   assert.match(deskScript, /realQuoteReserve/);
   assert.match(deskScript, /\/api\/social\?handle=/);
   assert.match(deskScript, /\/api\/history\?/);
-  assert.match(deskScript, /eth_sendTransaction/);
-  assert.equal(deskScript.match(/eth_sendTransaction/g)?.length, 1);
-  assert.match(deskScript, /personal_sign/);
-  assert.match(deskScript, /eip6963:requestProvider/);
-  assert.match(deskScript, /wallet_requestPermissions/);
-  assert.match(deskScript, /\/api\/auth\/challenge/);
-  assert.match(deskScript, /\/api\/auth\/verify/);
-  assert.match(deskScript, /Quote expired/);
+  assert.match(deskScript, /sessionAddress/);
+  assert.match(deskScript, /ALCHEMY SESSION/);
+  assert.match(deskScript, /UNSIGNED QUOTE/);
+  assert.doesNotMatch(deskScript, /eth_sendTransaction|personal_sign|eip6963:requestProvider|wallet_requestPermissions|eth_requestAccounts|\/api\/auth\/challenge|\/api\/auth\/verify/);
   assert.doesNotMatch(deskScript, /get-token/);
   assert.doesNotMatch(deskScript, /dblclick/);
 
@@ -204,7 +239,7 @@ test("Desk serves the UI, wallet-gated policy, and a read-only live snapshot wit
   const health = await fetch(`${base}/health`);
   assert.deepEqual(await health.json(), {
     status: "ok",
-    mode: "wallet-authenticated",
+    mode: "paper-only",
     chainId: 4663,
     trading: false,
     smartAccounts: false,

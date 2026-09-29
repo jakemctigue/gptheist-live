@@ -5,8 +5,11 @@ import { constants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENTS, EXECUTION_MODE, ensureSafeAuditDirectory, runSimulation, sanitizeTerminal, validateFixture, writeJsonlLog, type ReplayFixture, type SimulationResult } from "./simulation.js";
-import { startDeskServer } from "./server.js";
-import { DEFAULT_RPC_URL } from "./live.js";
+import { createHttpRpcCaller, startDeskServer } from "./server.js";
+import { DEFAULT_RPC_URL, fetchLiveSnapshot } from "./live.js";
+import { planPaperBook } from "./paper.js";
+import { tradePolicyFromEnv } from "./trading.js";
+import { SmartAccountCoordinator } from "./smartAccount.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -60,6 +63,33 @@ async function main(args: string[]): Promise<void> {
     await runFixture(resolve(process.cwd(), fixturePath));
     return;
   }
+  if (command === "paper") {
+    const alchemyKey = process.env.ALCHEMY_API_KEY?.trim();
+    const alchemyRpc = alchemyKey && /^[A-Za-z0-9_-]{10,200}$/.test(alchemyKey)
+      ? `https://robinhood-mainnet.g.alchemy.com/v2/${alchemyKey}#nologs,${DEFAULT_RPC_URL}`
+      : undefined;
+    const rpcUrl = process.env.ROBINHOOD_RPC_URL ?? process.env.RPC_URL ?? alchemyRpc;
+    const rpc = createHttpRpcCaller(rpcUrl);
+    const snapshot = await fetchLiveSnapshot(rpc);
+    const account = new SmartAccountCoordinator({ rpc }).sessionAddress();
+    const book = planPaperBook(snapshot.launches, tradePolicyFromEnv(), account, {
+      chainId: snapshot.chainId,
+      headBlock: snapshot.headBlock
+    });
+    const lines = [
+      "GPTHEIST — PAPER BOOK",
+      "Safety: simulation only; no wallet prompt, signing, or submitted order.",
+      `Chain ${book.chainId} at block ${book.headBlock}. Account ${book.account.kind}${book.account.address ? ` ${book.account.address}` : ""}.`,
+      `Considered ${book.considered}; open paper positions ${book.positions.length}; executed=${String(book.executed)}.`,
+      ""
+    ];
+    if (book.positions.length === 0) lines.push("No launch passed the paper rules.");
+    for (const position of book.positions) {
+      lines.push(`${position.side} ${position.symbol} score ${position.score} size ${position.sizeWei} wei · ${position.reasons[0]} · executed=false`);
+    }
+    process.stdout.write(`${lines.join("\n")}\n`);
+    return;
+  }
   if (command === "agents") {
     process.stdout.write("GPTHEIST — TEN AGENTS, ONE DECISION\n\n");
     AGENTS.forEach((agent, index) => {
@@ -90,7 +120,7 @@ async function main(args: string[]): Promise<void> {
     const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl, cacheMs, failureCacheMs: pollMs } : { host, port, cacheMs, failureCacheMs: pollMs });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
-    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. The server never receives the treasury key; an optional isolated session key can be configured.\n`);
+    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with Alchemy-session paper quotes\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. Quotes stay unsigned. The session key never reaches the browser.\n`);
     await new Promise<void>(() => undefined);
     return;
   }
@@ -144,9 +174,10 @@ async function main(args: string[]): Promise<void> {
       "  gptheist replay <fixture.json>",
       "  gptheist agents",
       "  gptheist desk [--host 127.0.0.1] [--port 4173]",
+      "  gptheist paper",
       "  gptheist doctor",
       "",
-      "Desk: Robinhood Chain launch feed with optional browser-wallet trade gates.",
+      "Desk: Robinhood Chain launch feed. Quotes are prepared for the Alchemy session and stay unsigned.",
       "Replay: deterministic paper-only simulation.",
       ""
     ].join("\n"));

@@ -284,13 +284,19 @@ export class SmartAccountCoordinator {
     return Boolean(this.#apiKey && this.#sessionKey);
   }
 
-  publicConfiguration(): { enabled: boolean; chainId: number; accountType: "sma-b"; spendCapUsd: string; sessionTtlSeconds: number; reason?: string } {
+  sessionAddress(): Address | null {
+    return this.#sessionKey;
+  }
+
+  publicConfiguration(): { enabled: boolean; chainId: number; accountType: "sma-b"; spendCapUsd: string; sessionTtlSeconds: number; sessionAddress: Address | null; execution: "paper-only"; reason?: string } {
     const result = {
       enabled: this.configured,
       chainId: ROBINHOOD_CHAIN_ID,
       accountType: "sma-b" as const,
       spendCapUsd: formatUsdCents(this.#spendCapUsdCents),
-      sessionTtlSeconds: SESSION_TTL_SECONDS
+      sessionTtlSeconds: SESSION_TTL_SECONDS,
+      sessionAddress: this.#sessionKey,
+      execution: "paper-only" as const
     };
     return this.configured ? result : { ...result, reason: "Alchemy API key or orchestrator session key is not configured" };
   }
@@ -419,7 +425,7 @@ export class SmartAccountCoordinator {
       plan = [...this.#plans.values()].find((candidate) => candidate.owner === owner && candidate.accountId === value.id);
       const signerAddress = normalizeAddress(value.signerAddress, "signer address");
       if (!plan || signerAddress !== owner || value.includeCounterfactualInfo !== true || !sameJson(value.creationHint, { accountType: "sma-b", createAdditional: true })) {
-        throw new SmartAccountError("ACCOUNT_POLICY_MISMATCH", "only the current MetaMask owner may request the planned Modular Account V2", 403);
+        throw new SmartAccountError("ACCOUNT_POLICY_MISMATCH", "only the configured Alchemy session may request the planned Modular Account V2", 403);
       }
     } else if (request.method === "wallet_createSession") {
       const params = request.params[0];
