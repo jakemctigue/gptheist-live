@@ -1,14 +1,14 @@
 # Wallet and orchestration boundary
 
-GPTHEIST targets Robinhood Chain mainnet (chain ID 4663). The application may prepare a transaction, but only the selected MetaMask account can sign and submit it.
+GPTHEIST targets Robinhood Chain mainnet (chain ID 4663). The Desk prepares an unsigned quote for the configured Alchemy session address. It does not ask a browser wallet to sign or submit that quote.
 
-## MetaMask and hardware wallets
+## Alchemy session
 
-The desk discovers MetaMask through EIP-6963, explicitly requests access to `eth_accounts`, switches to Robinhood Chain, and asks the selected account to sign a short-lived login challenge. A transaction still creates a separate MetaMask confirmation.
+`ORCHESTRATOR_SESSION_PRIVATE_KEY` identifies the Alchemy session. The Desk reads the derived address and uses it as the wallet for paper positions and quote preparation. The private key is not sent to the browser, and this application does not broadcast transactions with it.
 
-Ledger and Trezor EVM accounts connected through MetaMask use the same application path. Message and transaction signatures remain inside MetaMask and require the hardware device when the account is hardware-backed. GPTHEIST never receives a recovery phrase, private key, hardware-wallet transport, or unrestricted signing token.
+A browser extension is not part of the live path. There is no EIP-6963 discovery, `personal_sign` login, or `eth_sendTransaction` handoff.
 
-This is deliberately non-custodial. A truly custodial or unattended signer would be a separate security product: it needs an HSM or MPC quorum, withdrawal and contract allowlists, independent 33% enforcement, audit logs, emergency revocation, and a reviewed recovery ceremony. Do not implement that by placing a private key or seed phrase in Railway.
+Do not implement an unattended broadcaster by placing an additional treasury key in the browser or in a route that signs arbitrary calldata. Keep the session key in the secret manager.
 
 ## AI provider configuration
 
@@ -24,7 +24,7 @@ Railway injects these server-only variables:
 
 n8n is appropriate around the application, not inside the signing boundary. Recommended responsibilities are deployment checks, `/health` monitoring, alerts, daily summaries, MongoDB checkpoint monitoring, and human approval routing. Run it as a separate service with its own database, encryption key, authenticated webhooks, and least-privilege credentials.
 
-Do not give n8n a wallet seed, MetaMask session cookie, or an endpoint that bypasses the browser-wallet approval. It should never be the signer.
+Do not give n8n a wallet seed or an endpoint that signs quotes. It should never be the signer.
 
 ## Gainium
 
@@ -35,7 +35,6 @@ Gainium is designed around its supported exchange bots and webhook actions. GPTH
 1. The checkpointed collector stores Robinhood Chain data in MongoDB.
 2. GPTHEIST derives a deterministic WATCH or VETO assessment.
 3. Optional AI providers may explain the evidence but cannot change the deterministic result.
-4. The user explicitly authorizes the MetaMask account with a one-time signed challenge.
-5. The server enforces chain, venue, fee, score, 33% sizing, slippage, impact, simulation, gas, and authenticated-wallet gates.
-6. MetaMask displays the final transaction. A hardware-backed account also requires physical device confirmation.
-7. Optional n8n workflows observe health and results after the fact.
+4. The Desk binds the configured Alchemy session address. No browser signature is required.
+5. The server enforces chain, venue, fee, score, slippage, impact, simulation, gas, and session-address gates. The quote stays unsigned.
+6. Optional n8n workflows observe health and results after the fact.

@@ -425,7 +425,7 @@ export class SmartAccountCoordinator {
       plan = [...this.#plans.values()].find((candidate) => candidate.owner === owner && candidate.accountId === value.id);
       const signerAddress = normalizeAddress(value.signerAddress, "signer address");
       if (!plan || signerAddress !== owner || value.includeCounterfactualInfo !== true || !sameJson(value.creationHint, { accountType: "sma-b", createAdditional: true })) {
-        throw new SmartAccountError("ACCOUNT_POLICY_MISMATCH", "only the current MetaMask owner may request the planned Modular Account V2", 403);
+        throw new SmartAccountError("ACCOUNT_POLICY_MISMATCH", "only the configured Alchemy session may request the planned Modular Account V2", 403);
       }
     } else if (request.method === "wallet_createSession") {
       const params = request.params[0];

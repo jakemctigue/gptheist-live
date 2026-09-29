@@ -187,6 +187,11 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
       throw new Error("GPTHEIST_PUBLIC_ORIGIN must be an http(s) origin without a path");
     }
   }
+  const requireAlchemySession = () => {
+    const address = smartAccounts.sessionAddress();
+    if (!address) throw new WalletAuthError("SESSION_REQUIRED", "Alchemy session is not configured", 401);
+    return address;
+  };
   const historyCacheMs = options.historyCacheMs ?? 30 * 60_000;
   const socialCache = new Map<string, { at: number; value: string }>();
   const historyCache = new Map<string, { at: number; value: DeployerHistory }>();
@@ -221,7 +226,6 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     "/vault": ["room.html", "text/html; charset=utf-8"],
     "/desk.css": ["desk.css", "text/css; charset=utf-8"],
     "/desk.js": ["desk.js", "text/javascript; charset=utf-8"],
-    "/smart-account.js": ["smart-account.js", "text/javascript; charset=utf-8"],
     "/rooms.js": ["rooms.js", "text/javascript; charset=utf-8"]
   };
 
@@ -235,9 +239,12 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
           return;
         }
         const session = walletAuth.readSession(sessionToken(request));
+        const sessionAddress = smartAccounts.sessionAddress();
         send(response, 200, "application/json; charset=utf-8", JSON.stringify(session
           ? { authenticated: true, wallet: session.wallet, expiresAt: session.expiresAt }
-          : { authenticated: false }), { "cache-control": "no-store" });
+          : sessionAddress
+            ? { authenticated: true, wallet: sessionAddress, provider: "alchemy-session" }
+            : { authenticated: false }), { "cache-control": "no-store" });
         return;
       }
       if (path === "/api/providers") {
@@ -313,12 +320,11 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         try {
           requireSameOrigin(request, configuredOrigin);
-          const session = walletAuth.readSession(sessionToken(request));
-          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
+          const owner = requireAlchemySession();
           const body = await readJsonBody(request);
           if (typeof body !== "object" || body === null || Array.isArray(body)) throw new SmartAccountError("INVALID_PLAN", "plan body must be an object", 400);
           const value = body as Record<string, unknown>;
-          const plan = await smartAccounts.createPlan(session.wallet, value.token, value.curve);
+          const plan = await smartAccounts.createPlan(owner, value.token, value.curve);
           send(response, 200, "application/json; charset=utf-8", JSON.stringify(plan), { "cache-control": "no-store" });
         } catch (error: unknown) {
           if (error instanceof WalletAuthError) authError(response, error);
@@ -335,9 +341,8 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         try {
           requireSameOrigin(request, configuredOrigin);
-          const session = walletAuth.readSession(sessionToken(request));
-          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
-          const payload = await smartAccounts.proxyWalletRpc(session.wallet, await readJsonBody(request, 32_768));
+          const owner = requireAlchemySession();
+          const payload = await smartAccounts.proxyWalletRpc(owner, await readJsonBody(request, 32_768));
           send(response, 200, "application/json; charset=utf-8", JSON.stringify(payload), { "cache-control": "no-store" });
         } catch (error: unknown) {
           if (error instanceof WalletAuthError) authError(response, error);
@@ -354,9 +359,8 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         try {
           requireSameOrigin(request, configuredOrigin);
-          const session = walletAuth.readSession(sessionToken(request));
-          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
-          const active = await smartAccounts.activate(session.wallet, await readJsonBody(request));
+          const owner = requireAlchemySession();
+          const active = await smartAccounts.activate(owner, await readJsonBody(request));
           send(response, 200, "application/json; charset=utf-8", JSON.stringify(active), { "cache-control": "no-store" });
         } catch (error: unknown) {
           if (error instanceof WalletAuthError) authError(response, error);
@@ -373,9 +377,8 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         try {
           requireSameOrigin(request, configuredOrigin);
-          const session = walletAuth.readSession(sessionToken(request));
-          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the MetaMask treasury first", 401);
-          const revoked = await smartAccounts.revoke(session.wallet);
+          const owner = requireAlchemySession();
+          const revoked = await smartAccounts.revoke(owner);
           send(response, 200, "application/json; charset=utf-8", JSON.stringify(revoked), { "cache-control": "no-store" });
         } catch (error: unknown) {
           if (error instanceof WalletAuthError) authError(response, error);
@@ -392,18 +395,17 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         try {
           requireSameOrigin(request, configuredOrigin);
-          const session = walletAuth.readSession(sessionToken(request));
-          if (!session) throw new WalletAuthError("AUTH_REQUIRED", "authenticate the trading wallet with MetaMask first", 401);
+          const sessionAddress = requireAlchemySession();
           const body = await readJsonBody(request);
           if (typeof body !== "object" || body === null || Array.isArray(body)) {
             throw new TradeGateError("INVALID_REQUEST", "request body must be a JSON object", 400);
           }
           const requestedWallet = normalizedWallet((body as Record<string, unknown>).wallet);
-          if (requestedWallet !== session.wallet) {
-            throw new WalletAuthError("AUTH_WALLET_MISMATCH", "authenticated wallet does not match the trade wallet", 403);
+          if (requestedWallet !== sessionAddress) {
+            throw new WalletAuthError("AUTH_WALLET_MISMATCH", "trade wallet must be the configured Alchemy session", 403);
           }
           const prepared = await preparePonsTrade(rpc, body as TradeRequest, tradePolicy);
-          prepared.gates.splice(2, 0, { id: "WALLET_AUTHENTICATED", passed: true, detail: "Server verified the wallet's one-time signed login challenge" });
+          prepared.gates.splice(2, 0, { id: "WALLET_AUTHENTICATED", passed: true, detail: "Trade wallet matches the configured Alchemy session. The quote is unsigned and is not broadcast." });
           send(response, 200, "application/json; charset=utf-8", JSON.stringify(prepared));
         } catch (error: unknown) {
           if (error instanceof WalletAuthError) {
@@ -421,7 +423,8 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         return;
       }
       if (path === "/health") {
-        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: "wallet-authenticated", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled, smartAccounts: smartAccounts.publicConfiguration().enabled, providers: publicAiProviderStatus(aiProviders) }));
+        const sessionAddress = smartAccounts.sessionAddress();
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ status: "ok", mode: sessionAddress ? "alchemy-session" : "paper-only", chainId: ROBINHOOD_CHAIN_ID, trading: tradePolicy.enabled, smartAccounts: smartAccounts.publicConfiguration().enabled, providers: publicAiProviderStatus(aiProviders) }));
         return;
       }
       if (path === "/api/smart-account/config") {
@@ -429,12 +432,11 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         return;
       }
       if (path === "/api/smart-account/status") {
-        const session = walletAuth.readSession(sessionToken(request));
-        if (!session) {
-          send(response, 401, "application/json; charset=utf-8", JSON.stringify({ error: "authenticate the MetaMask treasury first", code: "AUTH_REQUIRED" }), { "cache-control": "no-store" });
-          return;
-        }
-        send(response, 200, "application/json; charset=utf-8", JSON.stringify({ grant: await smartAccounts.status(session.wallet) }), { "cache-control": "no-store" });
+        const sessionAddress = smartAccounts.sessionAddress();
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify({
+          grant: sessionAddress ? await smartAccounts.status(sessionAddress) : null,
+          account: { kind: sessionAddress ? "alchemy-session" : "unconfigured", address: sessionAddress }
+        }), { "cache-control": "no-store" });
         return;
       }
       if (path === "/api/trade/policy") {
