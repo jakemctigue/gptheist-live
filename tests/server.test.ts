@@ -151,6 +151,12 @@ test("trade preparation accepts only the configured Alchemy session and does not
   const auth = await fetch(`${base}/api/auth/session`);
   assert.deepEqual(await auth.json(), { authenticated: true, wallet: sessionAccount.address, provider: "alchemy-session" });
 
+  for (const path of ["/api/smart-account/plan", "/api/smart-account/rpc", "/api/smart-account/activate", "/api/smart-account/revoke"]) {
+    const unauthorized = await fetch(`${base}${path}`, { method: "POST", headers, body: "{}" });
+    assert.equal(unauthorized.status, 401);
+    assert.equal((await unauthorized.json() as { code: string }).code, "AUTH_REQUIRED");
+  }
+
   const mismatch = await fetch(`${base}/api/trade/prepare`, {
     method: "POST",
     headers,
