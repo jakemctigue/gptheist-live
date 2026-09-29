@@ -42,6 +42,8 @@
     "transactions:import": "npm run build --silent && node dist/src/transactionImport.js",
     "transactions:sync": "npm run build --silent && node dist/src/transactionImport.js --scope pons-launches --follow --poll-ms 1000 --confirmations 1 --batch-size 100 --job-id robinhood-three-months",
     "desk": "npm run build --silent && node dist/src/cli.js desk",
+    "paper": "npm run build --silent && node dist/src/cli.js paper",
+    "paper:report": "npm run build --silent && node dist/src/cli.js paper report",
     "prepare": "npm run build"
   },
   "engines": {

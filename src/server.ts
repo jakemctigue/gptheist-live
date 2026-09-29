@@ -8,6 +8,7 @@ import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv
 import { normalizedWallet, WalletAuth, WalletAuthError } from "./walletAuth.js";
 import { aiProviderConfigFromEnv, publicAiProviderStatus, type AiProviderConfig } from "./providerConfig.js";
 import { SmartAccountCoordinator, SmartAccountError } from "./smartAccount.js";
+import { paperLedgerStoreFromEnv, paperReport, type PaperLedgerStore } from "./paperLedger.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
@@ -33,6 +34,7 @@ export interface DeskServerOptions {
   publicOrigin?: string;
   aiProviders?: AiProviderConfig;
   smartAccounts?: SmartAccountCoordinator;
+  paperLedger?: PaperLedgerStore;
 }
 
 export interface RpcCallerOptions {
@@ -179,6 +181,7 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
   const walletAuth = options.walletAuth ?? new WalletAuth();
   const aiProviders = options.aiProviders ?? aiProviderConfigFromEnv();
   const smartAccounts = options.smartAccounts ?? new SmartAccountCoordinator({ rpc });
+  const paperLedger = options.paperLedger ?? paperLedgerStoreFromEnv();
   const configuredOrigin = options.publicOrigin ?? (process.env.GPTHEIST_PUBLIC_ORIGIN?.trim() || undefined);
   if (configuredOrigin) {
     const parsed = new URL(configuredOrigin);
@@ -434,6 +437,11 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
           return;
         }
         send(response, 200, "application/json; charset=utf-8", JSON.stringify({ grant: await smartAccounts.status(session.wallet) }), { "cache-control": "no-store" });
+        return;
+      }
+      if (path === "/api/paper") {
+        const ledger = await paperLedger.load();
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(ledger ? paperReport(ledger) : { mode: "paper-only", started: false }), { "cache-control": "no-store" });
         return;
       }
       if (path === "/api/trade/policy") {

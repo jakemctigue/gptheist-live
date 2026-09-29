@@ -7,6 +7,13 @@ const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
 const children = new Set<ChildProcess>();
 let shuttingDown = false;
 let syncRestart: NodeJS.Timeout | null = null;
+let paperRestart: NodeJS.Timeout | null = null;
+
+export function paperLedgerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = (env.PAPER_LEDGER_ENABLED ?? "true").trim().toLowerCase();
+  if (value !== "true" && value !== "false") throw new Error("PAPER_LEDGER_ENABLED must be true or false");
+  return value === "true";
+}
 
 export function transactionSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   const pollMs = env.ROBINHOOD_POLL_MS?.trim() || "1000";
@@ -58,10 +65,22 @@ function launchSync(): void {
   });
 }
 
+function launchPaper(): void {
+  const child = spawn(process.execPath, [resolve(runtimeDirectory, "cli.js"), "paper"], { env: process.env, stdio: "inherit" });
+  children.add(child);
+  child.once("exit", (code) => {
+    children.delete(child);
+    if (shuttingDown) return;
+    process.stderr.write(`Paper ledger exited with code ${String(code ?? 1)}; resuming from its saved ledger in 5 seconds.\n`);
+    paperRestart = setTimeout(launchPaper, 5_000);
+  });
+}
+
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   if (syncRestart) clearTimeout(syncRestart);
+  if (paperRestart) clearTimeout(paperRestart);
   for (const child of children) child.kill("SIGTERM");
   const forceExit = setTimeout(() => {
     for (const child of children) child.kill("SIGKILL");
@@ -76,6 +95,11 @@ export function startService(): void {
     launchSync();
   } else {
     process.stdout.write("TRANSACTION SYNC — skipped; configure ALCHEMY_API_KEY or ROBINHOOD_RPC_URL to enable durable ingestion.\n");
+  }
+  if (paperLedgerEnabled(process.env)) {
+    const store = process.env.PAPER_LEDGER_STORE?.trim().toLowerCase() || (process.env.MONGODB_URI?.trim() ? "mongodb" : "file");
+    process.stdout.write(`PAPER LEDGER — enabled; storing in ${store === "mongodb" ? "MongoDB" : "a local file that does not survive redeploys"}.\n`);
+    launchPaper();
   }
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

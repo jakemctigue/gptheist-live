@@ -2,6 +2,7 @@ node_modules/
 dist/
 assets/desk/smart-account.js
 runs/
+paper/
 *.tgz
 .env
 .DS_Store

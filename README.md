@@ -77,6 +77,8 @@ Audit: runs/b8d3603a21d62139.jsonl
 | `npm run transactions:plan` | Measures a three-calendar-month Robinhood transaction backfill without writing |
 | `npm run transactions:import -- [options]` | Imports strategy-scoped Robinhood transactions into MongoDB with checkpoints |
 | `npm run transactions:sync` | Resumes the Pons-launch backfill, then polls for new Robinhood blocks every second |
+| `npm run paper` | Runs the forward paper ledger against live Robinhood Chain curves until stopped |
+| `npm run paper:report` | Prints the paper ledger's positions and P&L |
 | `npm test` | Builds and runs the complete test suite |
 
 ## Production deployment
@@ -124,6 +126,21 @@ railway variables set SMART_ACCOUNT_MAX_FEE_PER_GAS_WEI=1000000000
 The authenticated MetaMask account remains the owner and treasury. Setup requests a separate `sma-b` account, grants one 24-hour session to the configured session-key address, and asks MetaMask to fund the counterfactual address with the current Alchemy-priced ETH equivalent of exactly $30 plus the bounded gas reserve. The grant uses only `buy(uint256,uint256,address)` and `sell(uint256,uint256,address)` on the factory-verified curve plus `approve(address,uint256)` on its token; Pons exposes no cancel or reprice selector, so those behaviors mean discarding an old quote and preparing a new one. Newly launched curves require a new owner authorization rather than receiving global selector authority.
 
 The usable permission context is persisted in MongoDB so restarts retain it. Disabling it in the Desk destroys that context in MongoDB immediately, which stops this application from using the session key. Wallet APIs v5 does not expose an owner-side revoke action, so this control is not an on-chain uninstall: the on-chain authorization independently expires after 24 hours, and the Desk will not create another grant before then. The initial funding transaction does not deploy the counterfactual account—the first valid ERC-4337 UserOperation does.
+
+## Forward paper ledger
+
+The paper ledger builds a live track record for the Desk's WATCH verdict without signing or sending anything. Every `PAPER_POLL_MS` (default 60 s) it reads the same verified Pons snapshot as the Desk. Each new WATCH launch on a native-ETH curve gets one hypothetical buy of `PAPER_STAKE_WEI` (default 0.001 ETH) at the current reserves. That buy pays the curve fee, creator tax, current snipe tax, and `PAPER_GAS_UNITS_PER_TRADE` × the live gas price. Open positions are marked at the curve's sell price, net of the same fees and exit gas, and close on the first rule that fires:
+
+| Exit | Default |
+|---|---|
+| Take-profit | net P&L ≥ +50% of stake (`PAPER_TAKE_PROFIT_BPS=5000`) |
+| Stop-loss | net P&L ≤ −30% of stake (`PAPER_STOP_LOSS_BPS=3000`) |
+| Max hold | 24 hours (`PAPER_MAX_HOLD_MINUTES=1440`) |
+| Left curve | the factory reports the launch graduated or swept; exit at the last curve mark |
+
+At most `PAPER_MAX_OPEN_POSITIONS` (default 5) are open at once; further WATCH launches are counted as skipped rather than entered later at a better-known price. The policy is written into the ledger when it starts and cannot be loosened afterwards; changing it requires a new `PAPER_LEDGER_ID` (MongoDB) or `PAPER_LEDGER_PATH` (file). Marks use pinned curve reserves, not executed fills, so real slippage from competing transactions is not modeled, and a graduated launch's pool price is not followed.
+
+The ledger is stored in MongoDB when `MONGODB_URI` is set, otherwise in `paper/ledger.json`. On Railway set `MONGODB_URI`, because the local filesystem is lost on every deploy. `npm start` runs the ledger alongside the Desk unless `PAPER_LEDGER_ENABLED=false`, and the Desk serves the current report at `GET /api/paper`.
 
 ## MongoDB transaction backfill
 
