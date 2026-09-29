@@ -120,7 +120,7 @@ async function main(args: string[]): Promise<void> {
     const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl, cacheMs, failureCacheMs: pollMs } : { host, port, cacheMs, failureCacheMs: pollMs });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
-    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with browser-wallet execution gates\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. The server never receives the treasury key; an optional isolated session key can be configured.\n`);
+    process.stdout.write(`GPTHEIST DESK — Robinhood Chain watch with Alchemy-session paper quotes\nhttp://${sanitizeTerminal(host)}:${boundPort}\nPolling every ${pollMs} ms. Quotes stay unsigned. The session key never reaches the browser.\n`);
     await new Promise<void>(() => undefined);
     return;
   }
@@ -177,7 +177,7 @@ async function main(args: string[]): Promise<void> {
       "  gptheist paper",
       "  gptheist doctor",
       "",
-      "Desk: Robinhood Chain launch feed with optional browser-wallet trade gates.",
+      "Desk: Robinhood Chain launch feed. Quotes are prepared for the Alchemy session and stay unsigned.",
       "Replay: deterministic paper-only simulation.",
       ""
     ].join("\n"));

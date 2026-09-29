@@ -36,10 +36,10 @@ test("agents lists every role exactly once", () => {
   for (const name of expected) assert.equal(output.match(new RegExp(`^\\d+\\. ${name} —`, "gm"))?.length, 1);
 });
 
-test("help advertises the wallet-gated Robinhood Chain Desk command", () => {
+test("help advertises the Alchemy-session Robinhood Chain Desk command", () => {
   const output = execFileSync(process.execPath, [cli, "--help"], { cwd: process.cwd(), encoding: "utf8" });
   assert.match(output, /gptheist desk/);
-  assert.match(output, /browser-wallet trade gates/);
+  assert.match(output, /Quotes are prepared for the Alchemy session and stay unsigned/);
 });
 
 test("doctor checks Node, fixtures, audit directory, dependencies, and paper-only mode", () => {
