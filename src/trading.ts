@@ -302,7 +302,8 @@ export async function preparePonsTrade(rpc: RpcCaller, input: TradeRequest, poli
       realQuoteReserve: realQuoteReserve.toString(),
       graduationThreshold: launch.graduationThreshold.toString(),
       progressBps: Number(progress > BPS ? BPS : progress),
-      currentSnipeTaxBps: snipeTaxBps
+      currentSnipeTaxBps: snipeTaxBps,
+      feeBps
     });
     if (assessment.verdict !== "WATCH" || assessment.score < policy.minBuyScore) {
       throw new TradeGateError("WATCH_GATE", `buy requires a WATCH assessment at or above ${policy.minBuyScore}/100`);

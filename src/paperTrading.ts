@@ -511,7 +511,7 @@ function positionId(launch: LiveLaunch): string {
 }
 
 function totalFeeBps(market: VerifiedPonsMarketState): number {
-  return market.creatorTaxBps + market.currentSnipeTaxBps;
+  return market.feeBps + market.creatorTaxBps + market.currentSnipeTaxBps;
 }
 
 async function openPosition(
@@ -576,8 +576,8 @@ async function openPosition(
       entryPriceImpactBps: quote.priceImpactBps,
       modeledSlippageBps: config.modeledSlippageBps,
       lastMarkAt: null,
-      lastMarkUsdMicros: 0,
-      lastMarkReturnBps: null,
+      lastMarkUsdMicros: entryDebitUsdMicros,
+      lastMarkReturnBps: 0,
       lastMarkStatus: "PENDING",
       lastMarkError: null,
       exitProceedsUsdMicros: null,
@@ -632,7 +632,10 @@ async function markOpenPosition(
     await positions.updateOne({ _id: position._id, status: "OPEN" }, {
       $set: { lastMarkAt: now, lastMarkStatus: "UNAVAILABLE", lastMarkError: reason.slice(0, 160) }
     });
-    if (monthEnded) await closePosition(positions, position, position.lastMarkUsdMicros, "MONTH_END_STALE_MARK", now);
+    const heldMs = now.getTime() - position.openedAt.getTime();
+    const staleClose: CloseReason | null = monthEnded ? "MONTH_END_STALE_MARK"
+      : heldMs >= config.maxHoldMs ? "TIME_STOP" : null;
+    if (staleClose) await closePosition(positions, position, position.lastMarkUsdMicros, staleClose, now);
     return;
   }
   const feeBps = totalFeeBps(research.market);

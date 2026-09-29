@@ -61,7 +61,8 @@ test("scores verified ETH launches for watchlisting with inspectable reasons", (
     realQuoteReserve: "2100000000000000000",
     graduationThreshold: "4200000000000000000",
     progressBps: 5000,
-    currentSnipeTaxBps: 0
+    currentSnipeTaxBps: 0,
+    feeBps: 100
   });
   assert.equal(assessment.verdict, "WATCH");
   assert.equal(assessment.score, 100);
@@ -83,7 +84,8 @@ test("vetoes unsupported pairs and unavailable evidence with explicit blockers",
     realQuoteReserve: "0",
     graduationThreshold: "10",
     progressBps: 0,
-    currentSnipeTaxBps: 0
+    currentSnipeTaxBps: 0,
+    feeBps: 100
   });
   assert.equal(unsupported.verdict, "VETO");
   assert.match(unsupported.blockers.join(" "), /unsupported pair/i);
@@ -121,7 +123,8 @@ test("decodes pinned Pons factory and curve reads into verified market evidence"
     factoryRecord,
     reserves: `0x${uintWord("1680000000000000000")}${uintWord("970000000000000000000000000")}`,
     realQuoteReserve: `0x${uintWord("2100000000000000000")}`,
-    currentSnipeTaxBps: `0x${word("0x0")}`
+    currentSnipeTaxBps: `0x${word("0x0")}`,
+    feeBps: `0x${word("0x64")}`
   }), {
     status: "VERIFIED",
     creatorFeeRecipient: "0x4444444444444444444444444444444444444444",
@@ -133,7 +136,8 @@ test("decodes pinned Pons factory and curve reads into verified market evidence"
     realQuoteReserve: "2100000000000000000",
     graduationThreshold: "4200000000000000000",
     progressBps: 5000,
-    currentSnipeTaxBps: 0
+    currentSnipeTaxBps: 0,
+    feeBps: 100
   });
 });
 
@@ -326,6 +330,7 @@ test("fetches market evidence with read-only calls pinned to the snapshot head",
           { success: true, returnData: `0x${uintWord("1680000000000000000")}${uintWord("970000000000000000000000000")}` as `0x${string}` },
           { success: true, returnData: `0x${uintWord("2100000000000000000")}` as `0x${string}` },
           { success: true, returnData: `0x${word("0x0")}` as `0x${string}` },
+          { success: true, returnData: `0x${word("0x64")}` as `0x${string}` },
           { success: true, returnData: tokenName },
           { success: true, returnData: tokenSymbol },
           { success: true, returnData: tokenInfo }

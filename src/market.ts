@@ -50,7 +50,8 @@ export const PONS_SELECTORS = {
   getLaunchedToken: "0x3cf28b5a",
   getReserves: "0x0902f1ac",
   realQuoteReserve: "0x4f1f58fd",
-  currentSnipeTaxBps: "0xd7e1ef39"
+  currentSnipeTaxBps: "0xd7e1ef39",
+  feeBps: "0x24a9d853"
 } as const;
 
 export const MARKET_PROBE_RECIPIENT = "0x000000000000000000000000000000000000dead";
@@ -60,6 +61,7 @@ export interface PonsMarketReads {
   reserves: unknown;
   realQuoteReserve: unknown;
   currentSnipeTaxBps: unknown;
+  feeBps: unknown;
 }
 
 export interface VerifiedPonsMarketState {
@@ -74,6 +76,7 @@ export interface VerifiedPonsMarketState {
   graduationThreshold: string;
   progressBps: number;
   currentSnipeTaxBps: number;
+  feeBps: number;
 }
 
 export interface RejectedPonsMarketState {
@@ -198,7 +201,8 @@ export function decodePonsMarketState(launch: LiveLaunch, reads: PonsMarketReads
   const reserves = words(reads.reserves, 2);
   const real = words(reads.realQuoteReserve, 1);
   const opening = words(reads.currentSnipeTaxBps, 1);
-  if (!record || !reserves || !real || !opening) return reject("malformed Pons market response");
+  const protocolFee = words(reads.feeBps, 1);
+  if (!record || !reserves || !real || !opening || !protocolFee) return reject("malformed Pons market response");
 
   const token = address(record[0]);
   const curve = address(record[1]);
@@ -214,10 +218,12 @@ export function decodePonsMarketState(launch: LiveLaunch, reads: PonsMarketReads
   const tokenReserve = uint(reserves[1]);
   const realQuoteReserve = uint(real[0]);
   const currentSnipeTaxBps = uint(opening[0]);
+  const feeBps = uint(protocolFee[0]);
 
   if (!token || !curve || !deployer || !creatorFeeRecipient || !pairToken || graduationThreshold === null ||
       creatorTaxBps === null || buybackEnabled === null || phaseNumber === null || exists === null ||
-      quoteReserve === null || tokenReserve === null || realQuoteReserve === null || currentSnipeTaxBps === null) {
+      quoteReserve === null || tokenReserve === null || realQuoteReserve === null || currentSnipeTaxBps === null ||
+      feeBps === null) {
     return reject("invalid Pons market values");
   }
   if (!exists || token !== launch.token || curve !== launch.curve || deployer !== launch.deployer ||
@@ -225,7 +231,8 @@ export function decodePonsMarketState(launch: LiveLaunch, reads: PonsMarketReads
     return reject("factory record contradicts launch event");
   }
   const phase = PHASES[Number(phaseNumber)];
-  if (!phase || creatorTaxBps > 10_000n || currentSnipeTaxBps > 10_000n || quoteReserve === 0n || tokenReserve === 0n) {
+  if (!phase || creatorTaxBps > 10_000n || currentSnipeTaxBps > 10_000n || feeBps > 10_000n ||
+      quoteReserve === 0n || tokenReserve === 0n) {
     return reject("Pons market values are outside protocol bounds");
   }
   const progress = graduationThreshold === 0n ? 0n : (realQuoteReserve * 10_000n) / graduationThreshold;
@@ -240,7 +247,8 @@ export function decodePonsMarketState(launch: LiveLaunch, reads: PonsMarketReads
     realQuoteReserve: realQuoteReserve.toString(),
     graduationThreshold: graduationThreshold.toString(),
     progressBps: Number(progress > 10_000n ? 10_000n : progress),
-    currentSnipeTaxBps: Number(currentSnipeTaxBps)
+    currentSnipeTaxBps: Number(currentSnipeTaxBps),
+    feeBps: Number(feeBps)
   };
 }
 
@@ -268,6 +276,7 @@ export async function readPonsLaunchResearch(
       allowFailure: true,
       callData: `${PONS_SELECTORS.currentSnipeTaxBps}${encodeAddressArgument(MARKET_PROBE_RECIPIENT)}` as Hex
     },
+    { target: launch.curve as `0x${string}`, allowFailure: true, callData: PONS_SELECTORS.feeBps },
     { target: launch.token as `0x${string}`, allowFailure: true, callData: encodeFunctionData({ abi: TOKEN_METADATA_ABI, functionName: "name" }) },
     { target: launch.token as `0x${string}`, allowFailure: true, callData: encodeFunctionData({ abi: TOKEN_METADATA_ABI, functionName: "symbol" }) },
     { target: launch.token as `0x${string}`, allowFailure: true, callData: encodeFunctionData({ abi: TOKEN_METADATA_ABI, functionName: "getTokenInfo" }) }
@@ -281,17 +290,18 @@ export async function readPonsLaunchResearch(
     if (results.length !== calls.length) throw new Error("incomplete multicall response");
 
     return launches.map((launch, index) => {
-      const group = results.slice(index * 7, index * 7 + 7);
-      const market = group.length === 7 && group.slice(0, 4).every((result) => result.success)
+      const group = results.slice(index * 8, index * 8 + 8);
+      const market = group.length === 8 && group.slice(0, 5).every((result) => result.success)
         ? decodePonsMarketState(launch, {
           factoryRecord: group[0]?.returnData,
           reserves: group[1]?.returnData,
           realQuoteReserve: group[2]?.returnData,
-          currentSnipeTaxBps: group[3]?.returnData
+          currentSnipeTaxBps: group[3]?.returnData,
+          feeBps: group[4]?.returnData
         })
         : { status: "UNAVAILABLE", reason: "one or more pinned Pons market reads failed" } as PonsMarketState;
-      const metadata = group.length === 7 && group.slice(4).every((result) => result.success)
-        ? decodePonsTokenMetadata(group[4]?.returnData, group[5]?.returnData, group[6]?.returnData)
+      const metadata = group.length === 8 && group.slice(5).every((result) => result.success)
+        ? decodePonsTokenMetadata(group[5]?.returnData, group[6]?.returnData, group[7]?.returnData)
         : { status: "UNAVAILABLE", reason: "token metadata unreadable" } as PonsTokenMetadata;
       return { market, metadata };
     });
