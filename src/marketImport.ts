@@ -370,8 +370,7 @@ async function storeEvmRange(
     list.push(log);
     logsByBlock.set(blockNumber, list);
   }
-  let stored = 0;
-  for (const blockNumber of [...logsByBlock.keys()].sort((left, right) => left - right)) {
+  const storedByBlock = await Promise.all([...logsByBlock.keys()].sort((left, right) => left - right).map(async (blockNumber) => {
     const block = await evmBlock(rpc, blockNumber, true);
     const txs = transactionByHash(block);
     const blockLogs = logsByBlock.get(blockNumber) ?? [];
@@ -432,9 +431,9 @@ async function storeEvmRange(
         upsert: true
       } });
     }
-    if (operations.length > 0) stored += (await transactions.bulkWrite(operations, { ordered: false })).upsertedCount;
-  }
-  return stored;
+    return operations.length > 0 ? (await transactions.bulkWrite(operations, { ordered: false })).upsertedCount : 0;
+  }));
+  return storedByBlock.reduce((total, count) => total + count, 0);
 }
 
 async function importEthereum(
