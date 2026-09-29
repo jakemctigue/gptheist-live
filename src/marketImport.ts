@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MongoClient, type Collection } from "mongodb";
+import { MongoClient, type AnyBulkWriteOperation, type Collection, type Document } from "mongodb";
 import { toEventSelector } from "viem";
 
 type JsonObject = Record<string, unknown>;
@@ -86,6 +86,7 @@ interface MarketTransaction extends JsonObject {
   transactionIndex: number | null;
   timestamp: Date;
   protocols: string[];
+  programIds?: string[];
   ingestionMode: IngestionMode;
   ingestionLagMs: number;
   firstIngestedAt: Date;
@@ -384,6 +385,7 @@ async function storeEvmRange(
     const hashes = [...grouped.keys()];
     const receipts = await rpc.batch(hashes.map((hash) => ({ method: "eth_getTransactionReceipt", params: [hash] })));
     const now = new Date();
+    const operations: AnyBulkWriteOperation<MarketTransaction>[] = [];
     for (let index = 0; index < hashes.length; index += 1) {
       const hash = hashes[index];
       if (!hash) continue;
@@ -424,12 +426,13 @@ async function storeEvmRange(
         lastSeenAt: now
       };
       const { firstIngestedAt: _firstIngestedAt, ...mutableDocument } = document;
-      await transactions.updateOne({ _id: document._id }, {
-        $set: { ...mutableDocument, lastSeenAt: now },
-        $setOnInsert: { firstIngestedAt: now }
-      }, { upsert: true });
-      stored += 1;
+      operations.push({ updateOne: {
+        filter: { _id: document._id },
+        update: { $set: { ...mutableDocument, lastSeenAt: now }, $setOnInsert: { firstIngestedAt: now } },
+        upsert: true
+      } });
     }
+    if (operations.length > 0) stored += (await transactions.bulkWrite(operations, { ordered: false })).upsertedCount;
   }
   return stored;
 }
@@ -493,8 +496,9 @@ async function storeSolanaTransactions(
     const results = await rpc.batch(batch.map((entry) => ({
       method: "getTransaction",
       params: [entry.signature, { commitment: "finalized", encoding: "jsonParsed", maxSupportedTransactionVersion: 1 }]
-    })));
+    }))); 
     const now = new Date();
+    const operations: AnyBulkWriteOperation<MarketTransaction>[] = [];
     for (let index = 0; index < batch.length; index += 1) {
       const summary = batch[index];
       const result = results[index];
@@ -504,38 +508,34 @@ async function storeSolanaTransactions(
       const timestamp = new Date(blockTime * 1_000);
       const meta = isObject(result.meta) ? result.meta : {};
       const transaction = isObject(result.transaction) ? result.transaction : {};
-      const existing = await transactions.findOne({ _id: `solana:${summary.signature}` }, { projection: { protocols: 1, programIds: 1, firstIngestedAt: 1 } });
-      const protocols = [...new Set([...(existing?.protocols ?? []), protocol])];
-      const existingProgramIds = Array.isArray(existing?.programIds) ? existing.programIds.filter((value): value is string => typeof value === "string") : [];
-      const document: MarketTransaction = {
-        _id: `solana:${summary.signature}`,
-        network: "solana",
-        chainId: null,
-        hash: summary.signature,
-        blockNumber: summary.slot,
-        blockHash: null,
-        transactionIndex: null,
-        timestamp,
-        protocols,
-        programIds: [...new Set([...existingProgramIds, programId])],
-        success: meta.err === null,
-        feeLamports: typeof meta.fee === "number" ? String(meta.fee) : null,
-        computeUnitsConsumed: typeof meta.computeUnitsConsumed === "number" ? String(meta.computeUnitsConsumed) : null,
-        transaction,
-        innerInstructions: meta.innerInstructions ?? null,
-        logMessages: meta.logMessages ?? null,
-        preTokenBalances: meta.preTokenBalances ?? null,
-        postTokenBalances: meta.postTokenBalances ?? null,
-        preBalances: meta.preBalances ?? null,
-        postBalances: meta.postBalances ?? null,
-        ingestionMode: mode,
-        ingestionLagMs: Math.max(0, now.getTime() - timestamp.getTime()),
-        firstIngestedAt: existing?.firstIngestedAt instanceof Date ? existing.firstIngestedAt : now,
-        lastSeenAt: now
-      };
-      await transactions.replaceOne({ _id: document._id }, document, { upsert: true });
-      stored += existing ? 0 : 1;
+      const documentId = `solana:${summary.signature}`;
+      operations.push({ updateOne: {
+        filter: { _id: documentId },
+        update: {
+          $set: {
+            network: "solana", chainId: null, hash: summary.signature, blockNumber: summary.slot,
+            blockHash: null, transactionIndex: null, timestamp,
+            success: meta.err === null,
+            feeLamports: typeof meta.fee === "number" ? String(meta.fee) : null,
+            computeUnitsConsumed: typeof meta.computeUnitsConsumed === "number" ? String(meta.computeUnitsConsumed) : null,
+            transaction,
+            innerInstructions: meta.innerInstructions ?? null,
+            logMessages: meta.logMessages ?? null,
+            preTokenBalances: meta.preTokenBalances ?? null,
+            postTokenBalances: meta.postTokenBalances ?? null,
+            preBalances: meta.preBalances ?? null,
+            postBalances: meta.postBalances ?? null,
+            ingestionMode: mode,
+            ingestionLagMs: Math.max(0, now.getTime() - timestamp.getTime()),
+            lastSeenAt: now
+          },
+          $setOnInsert: { firstIngestedAt: now },
+          $addToSet: { protocols: { $each: [protocol] }, programIds: { $each: [programId] } }
+        } as Document,
+        upsert: true
+      } });
     }
+    if (operations.length > 0) stored += (await transactions.bulkWrite(operations, { ordered: false })).upsertedCount;
   }
   return stored;
 }
