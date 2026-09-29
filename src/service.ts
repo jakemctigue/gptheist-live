@@ -7,6 +7,7 @@ const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
 const children = new Set<ChildProcess>();
 let shuttingDown = false;
 let syncRestart: NodeJS.Timeout | null = null;
+let paperRestart: NodeJS.Timeout | null = null;
 
 export function transactionSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   const pollMs = env.ROBINHOOD_POLL_MS?.trim() || "1000";
@@ -30,6 +31,12 @@ function syncEnabled(env: NodeJS.ProcessEnv): boolean {
   const value = (env.TRANSACTION_SYNC_ENABLED ?? "true").trim().toLowerCase();
   if (value !== "true" && value !== "false") throw new Error("TRANSACTION_SYNC_ENABLED must be true or false");
   return value === "true" && Boolean(env.ALCHEMY_API_KEY?.trim() || env.ROBINHOOD_RPC_URL?.trim());
+}
+
+export function paperTradingEnabled(env: NodeJS.ProcessEnv): boolean {
+  const value = (env.PAPER_TRADING_ENABLED ?? "false").trim().toLowerCase();
+  if (value !== "true" && value !== "false") throw new Error("PAPER_TRADING_ENABLED must be true or false");
+  return value === "true";
 }
 
 function launchDesk(): void {
@@ -58,10 +65,29 @@ function launchSync(): void {
   });
 }
 
+function launchPaperTrading(): void {
+  const child = spawn(process.execPath, [resolve(runtimeDirectory, "paperTrading.js")], {
+    env: process.env,
+    stdio: "inherit"
+  });
+  children.add(child);
+  child.once("exit", (code) => {
+    children.delete(child);
+    if (shuttingDown) return;
+    if (code === 0) {
+      process.stdout.write("PAPER TRADING — month complete; worker exited cleanly.\n");
+      return;
+    }
+    process.stderr.write(`Paper-trading worker exited with code ${String(code ?? 1)}; restarting in 5 seconds.\n`);
+    paperRestart = setTimeout(launchPaperTrading, 5_000);
+  });
+}
+
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   if (syncRestart) clearTimeout(syncRestart);
+  if (paperRestart) clearTimeout(paperRestart);
   for (const child of children) child.kill("SIGTERM");
   const forceExit = setTimeout(() => {
     for (const child of children) child.kill("SIGKILL");
@@ -76,6 +102,12 @@ export function startService(): void {
     launchSync();
   } else {
     process.stdout.write("TRANSACTION SYNC — skipped; configure ALCHEMY_API_KEY or ROBINHOOD_RPC_URL to enable durable ingestion.\n");
+  }
+  if (paperTradingEnabled(process.env)) {
+    process.stdout.write("PAPER TRADING — enabled; starting the hosted $20 forward-only month.\n");
+    launchPaperTrading();
+  } else {
+    process.stdout.write("PAPER TRADING — disabled.\n");
   }
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

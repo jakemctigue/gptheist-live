@@ -77,6 +77,7 @@ Audit: runs/b8d3603a21d62139.jsonl
 | `npm run transactions:plan` | Measures a three-calendar-month Robinhood transaction backfill without writing |
 | `npm run transactions:import -- [options]` | Imports strategy-scoped Robinhood transactions into MongoDB with checkpoints |
 | `npm run transactions:sync` | Resumes the Pons-launch backfill, then polls for new Robinhood blocks every second |
+| `npm run paper:trade` | Runs the hosted, forward-only $20 paper account (no signing or transaction submission) |
 | `npm test` | Builds and runs the complete test suite |
 
 ## Production deployment
@@ -131,10 +132,11 @@ The transaction importer locates the requested start time by block timestamp and
 
 For latency-aware analysis, each transaction carries the launch metadata, addresses, function selector, compact calldata size, decimal-string numeric fields (`valueWei`, gas-price fields, and gas limit), `ingestionMode`, and `ingestionLagMs`. Decimal strings avoid losing precision on EVM quantities that exceed JavaScript or MongoDB integer ranges. A TTL index retains 93 days so continuous capture stays close to the requested rolling three-month corpus.
 
-Create a local MongoDB with a persistent Docker volume (or set `MONGODB_URI` for an existing server), then measure the range before importing it:
+Production ingestion requires a hosted MongoDB Atlas URI in Railway. Keep the populated URI in Railway's encrypted variables; do not create a local database or populated `.env` file:
 
-```powershell
-docker run -d --name gptheist-mongodb --restart unless-stopped -p 127.0.0.1:27017:27017 -v gptheist-mongodb-data:/data/db mongo:8.0
+```bash
+railway variables set MONGODB_URI="<mongodb-atlas-uri>"
+railway variables set GPTHEIST_MONGODB_DB=gptheist
 npm run transactions:plan
 npm run transactions:import -- --job-id robinhood-three-months
 npm run transactions:sync
@@ -143,6 +145,25 @@ npm run transactions:sync
 The default range is three calendar months ending 64 blocks behind the current head. For a bounded pilot, add `--max-blocks 10000`; rerunning the same command advances from its checkpoint. Pin `--from`, `--to-block`, and `--job-id` for a reproducible long-running job. The plan reports a conservative uncompressed storage estimate because full-chain history can be much larger than a workstation disk.
 
 `transactions:sync` uses the same checkpoint, polls the head every 1,000 ms, and persists through one block behind the head to reduce shallow-reorganization risk. The Desk uses the same one-second observation cadence and coalesces concurrent clients through a 900 ms server cache. The one-second cadence is an observation budget, not a profitability claim; use `ingestionLagMs` when training or backtesting so strategies do not assume zero-latency data.
+
+## Hosted 30-day paper account
+
+The Railway service can run one forward-only paper account from `$20.00`. It opens at most one position, allocates 10% of current paper cash, permits at most one new entry per UTC day, takes profit at +50%, stops at -20%, and closes after 24 hours. A launch must pass the existing 70/100 WATCH gate, use the native ETH pair, remain in the curve phase, and stay inside 5% total fees and 5% modeled price impact. Every quote also applies 3% modeled slippage and current gas.
+
+Enable the fixed strategy only in Railway:
+
+```bash
+railway variables set PAPER_TRADING_ENABLED=true
+railway variables set PAPER_STARTING_USD_MICROS=20000000
+railway variables set PAPER_DURATION_DAYS=30
+railway variables set PAPER_POSITION_BPS=1000
+railway variables set PAPER_TAKE_PROFIT_BPS=5000
+railway variables set PAPER_STOP_LOSS_BPS=2000
+```
+
+The worker reads only `eth_chainId`, `eth_blockNumber`, `eth_call`, and `eth_gasPrice`; it has no signing or send method. Atlas stores the immutable strategy, paper entries, marks, costs, exits, and account totals. `GET /api/paper-trading` returns the live ledger without exposing provider or database secrets.
+
+This is a forward observation, not a historical backtest. The three-month launch corpus does not contain post-launch price paths, and the configured RPC cannot reliably reconstruct historical state, so an immediate profit figure must remain an assumption-based scenario rather than a measured result.
 
 After `npm link`, use the shorter binary form:
 
@@ -203,7 +224,7 @@ These thresholds are demonstration rules, not trading advice or validated predic
 
 - not ten live LLM instances;
 - not evidence that a historical trade happened;
-- not a backtesting engine or profit calculator;
+- not a historical backtesting engine or profit guarantee; the hosted month is a forward paper ledger with explicit assumptions and costs;
 - not yet an autonomous ERC-4337 trade executor; this change creates and persists the restricted account session but does not submit strategy trades with it;
 - not a treasury-key custodian, exchange, or broker;
 - not able to bypass the configured gates or approve a MetaMask prompt.
