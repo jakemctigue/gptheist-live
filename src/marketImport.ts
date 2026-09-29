@@ -528,7 +528,7 @@ function solanaSignature(value: unknown): value is SolanaSignature {
     (typeof value.blockTime === "number" || value.blockTime === null);
 }
 
-function sampleSolanaSignatures(entries: SolanaSignature[], perMinute = 20): SolanaSignature[] {
+function sampleSolanaSignatures(entries: SolanaSignature[], perMinute = 5): SolanaSignature[] {
   const groups = new Map<number, SolanaSignature[]>();
   for (const entry of entries) {
     if (entry.blockTime === null) continue;
