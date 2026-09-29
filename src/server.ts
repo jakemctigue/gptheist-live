@@ -8,6 +8,7 @@ import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv
 import { normalizedWallet, WalletAuth, WalletAuthError } from "./walletAuth.js";
 import { aiProviderConfigFromEnv, publicAiProviderStatus, type AiProviderConfig } from "./providerConfig.js";
 import { SmartAccountCoordinator, SmartAccountError } from "./smartAccount.js";
+import { OpportunityMonitor } from "./opportunities.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
@@ -33,6 +34,8 @@ export interface DeskServerOptions {
   publicOrigin?: string;
   aiProviders?: AiProviderConfig;
   smartAccounts?: SmartAccountCoordinator;
+  monitor?: OpportunityMonitor;
+  monitorIntervalMs?: number;
 }
 
 export interface RpcCallerOptions {
@@ -178,6 +181,7 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
   const tradePolicy = options.tradePolicy ?? tradePolicyFromEnv();
   const walletAuth = options.walletAuth ?? new WalletAuth();
   const aiProviders = options.aiProviders ?? aiProviderConfigFromEnv();
+  const monitor = options.monitor ?? new OpportunityMonitor();
   const smartAccounts = options.smartAccounts ?? new SmartAccountCoordinator({ rpc });
   const configuredOrigin = options.publicOrigin ?? (process.env.GPTHEIST_PUBLIC_ORIGIN?.trim() || undefined);
   if (configuredOrigin) {
@@ -199,11 +203,13 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     if (cached && Date.now() - cached.at < cacheMs) return cached.value;
     if (cachedFailure && Date.now() - cachedFailure.at < failureCacheMs) throw new Error(cachedFailure.message);
     if (!pending) {
-      pending = fetchLiveSnapshot(rpc).then((value) => {
+      pending = fetchLiveSnapshot(rpc, { retainedLaunches: monitor.retainedLaunches() }).then((value) => {
+        monitor.observe(value);
         cached = { at: Date.now(), value };
         cachedFailure = null;
         return value;
       }).catch((error: unknown) => {
+        monitor.markUnavailable();
         const message = error instanceof Error ? error.message : "upstream unavailable";
         cachedFailure = { at: Date.now(), message };
         throw error;
@@ -220,11 +226,13 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     "/vault": ["room.html", "text/html; charset=utf-8"],
     "/desk.css": ["desk.css", "text/css; charset=utf-8"],
     "/desk.js": ["desk.js", "text/javascript; charset=utf-8"],
+    "/monitor.js": ["monitor.js", "text/javascript; charset=utf-8"],
+    "/monitor.css": ["monitor.css", "text/css; charset=utf-8"],
     "/smart-account.js": ["smart-account.js", "text/javascript; charset=utf-8"],
     "/rooms.js": ["rooms.js", "text/javascript; charset=utf-8"]
   };
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       const path = requestUrl.pathname;
@@ -541,6 +549,11 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         }
         return;
       }
+      if (path === "/api/opportunities") {
+        if (!cached) { try { await snapshot(); } catch { /* Report a stale state without exposing upstream secrets. */ } }
+        send(response, 200, "application/json; charset=utf-8", JSON.stringify(monitor.read()), { "cache-control": "no-store" });
+        return;
+      }
       const asset = assets[path];
       if (!asset) {
         send(response, 404, "text/plain; charset=utf-8", "Not found\n");
@@ -551,10 +564,23 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
       send(response, 500, "text/plain; charset=utf-8", "Internal error\n");
     }
   });
+  const intervalMs = options.monitorIntervalMs ?? 0;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 0 || (intervalMs > 0 && intervalMs < 5_000)) {
+    throw new Error("monitorIntervalMs must be zero or an integer of at least 5000");
+  }
+  let monitorTimer: ReturnType<typeof setTimeout> | undefined;
+  let monitorStopped = false;
+  const tick = async (): Promise<void> => {
+    try { await snapshot(); } catch { /* Failure state is captured by snapshot. */ }
+    if (!monitorStopped) { monitorTimer = setTimeout(() => { void tick(); }, intervalMs); monitorTimer.unref(); }
+  };
+  if (intervalMs > 0) server.once("listening", () => { void tick(); });
+  server.once("close", () => { monitorStopped = true; if (monitorTimer) clearTimeout(monitorTimer); });
+  return server;
 }
 
 export async function startDeskServer(options: DeskServerOptions & { host?: string; port?: number } = {}): Promise<Server> {
-  const server = createDeskServer(options);
+  const server = createDeskServer({ ...options, monitorIntervalMs: options.monitorIntervalMs ?? 15_000 });
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4173;
   server.listen(port, host);

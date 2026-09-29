@@ -12,6 +12,10 @@ let walletAuthenticated = false;
 let walletProvider = null;
 let tradePolicy = null;
 let preparedTrade = null;
+let tradeIntentRevision = 0;
+let tradePreparing = false;
+let tradeSending = false;
+let reviewToken = null;
 let smartAccountConfiguration = null;
 let smartAccountGrant = null;
 const deployerHistoryCache = new Map();
@@ -80,7 +84,8 @@ function animate(decision){
 function selectLaunch(launch){
   const selectionChanged=selected?.transactionHash!==launch.transactionHash;
   selected=launch;
-  if(selectionChanged){preparedTrade=null;if($("send-trade"))$("send-trade").disabled=true;if($("trade-result"))$("trade-result").textContent="Selection changed. Run every execution gate again."}
+  $("trade-target").textContent=`${launch.metadata.status==="DECLARED"?launch.metadata.symbol||launch.metadata.name:"TOKEN"} · ${launch.token}`;
+  if(selectionChanged){reviewToken=null;resetPreparedTrade("Selection changed. Run every execution gate again.")}
   document.querySelectorAll(".intercept").forEach(el=>el.classList.toggle("selected",el.dataset.tx===launch.transactionHash));
   $("selected-token").textContent=short(launch.token,8);$("trace-id").textContent=short(launch.transactionHash,8);
   $("pons-link").href=pons(launch.token);$("token-link").href=tokenExplorer(launch.token);$("tx-link").href=explorer(launch.transactionHash);
@@ -107,7 +112,10 @@ function renderFeed(snapshot){
   const launches=activeFilter==="ALL"?snapshot.launches:snapshot.launches.filter(x=>x.verdict===activeFilter);
   if(!launches.length){const empty=document.createElement("p");empty.className="empty";empty.textContent=`No ${activeFilter.toLowerCase()} launches in the current block window.`;feed.append(empty);return}
   launches.forEach((launch,i)=>{const button=document.createElement("button");button.type="button";button.className="intercept";button.dataset.tx=launch.transactionHash;const n=document.createElement("span");n.className="ordinal";n.textContent=String(i+1).padStart(2,"0");const body=document.createElement("div");const title=document.createElement("strong");title.textContent=short(launch.token,8);const meta=document.createElement("small");const progress=launch.market.status==="VERIFIED"?pct(launch.market.progressBps):"UNKNOWN";meta.textContent=`${launch.assessment.score}/100 · ${progress} CURVE · ${launch.pairLabel}`;body.append(title,meta);const badge=document.createElement("span");badge.className=`badge ${launch.verdict.toLowerCase()}`;badge.textContent=launch.verdict;button.append(n,body,badge);button.addEventListener("click",()=>selectLaunch(launch));feed.append(button)});
-  const stillPresent=selected&&launches.find(x=>x.transactionHash===selected.transactionHash);selectLaunch(stillPresent||launches[0]);
+  const stillPresent=selected&&launches.find(x=>x.transactionHash===selected.transactionHash);
+  // A feed refresh must not replace the token the user is reviewing in the trade form.
+  if(reviewToken&&selected?.token===reviewToken){if(stillPresent)selectLaunch(stillPresent);return}
+  selectLaunch(stillPresent||launches[0]);
 }
 
 function render(snapshot){
@@ -127,12 +135,12 @@ window.addEventListener("eip6963:announceProvider",event=>{const detail=event?.d
 window.dispatchEvent(new Event("eip6963:requestProvider"));
 function readableUnits(raw,decimals){try{const n=BigInt(raw),base=10n**BigInt(decimals),whole=n/base,fraction=(n%base).toString().padStart(decimals,"0").slice(0,6).replace(/0+$/g,"");return `${whole}${fraction?`.${fraction}`:""}`}catch{return "—"}}
 function updateTradeControls(){
-  const ready=Boolean(tradePolicy?.enabled&&walletAuthenticated&&walletAddress&&selected&&$("trade-ack").checked&&$("trade-amount").value.trim());
+  const ready=Boolean(!tradePreparing&&!tradeSending&&tradePolicy?.enabled&&walletAuthenticated&&walletAddress&&selected&&$("trade-ack").checked&&$("trade-amount").value.trim());
   $("prepare-trade").disabled=!ready;
   $("setup-smart-account").disabled=!Boolean(smartAccountConfiguration?.enabled&&walletAuthenticated&&walletAddress&&selected&&!smartAccountGrant);
   $("revoke-smart-account").disabled=!Boolean(walletAuthenticated&&smartAccountGrant?.status==="ACTIVE");
 }
-function resetPreparedTrade(message){preparedTrade=null;$("send-trade").disabled=true;$("trade-result").textContent=message;$("trade-tx").hidden=true}
+function resetPreparedTrade(message){tradeIntentRevision++;preparedTrade=null;$("send-trade").disabled=true;$("trade-result").textContent=message;$("trade-tx").hidden=true}
 async function getMetaMaskProvider(){
   if(walletProvider)return walletProvider;
   window.dispatchEvent(new Event("eip6963:requestProvider"));
@@ -225,29 +233,53 @@ async function revokeSmartAccount(){
   try{const response=await fetch("/api/smart-account/revoke",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:"{}"});const result=await response.json();if(!response.ok)throw new Error(`${result.code||"REVOKE_FAILED"}: ${result.error||`HTTP ${response.status}`}`);await loadSmartAccountStatus()}catch(error){$("smart-account-status").textContent=String(error?.message||error).slice(0,180)}finally{updateTradeControls()}
 }
 async function prepareTrade(){
-  if(!selected||!walletAddress)return;
+  if(tradePreparing||tradeSending||!selected||!walletAuthenticated||!walletAddress||!$("trade-ack").checked)return;
   resetPreparedTrade("Running chain, venue, amount, fee, quote, simulation, and balance gates…");$("prepare-trade").disabled=true;$("trade-gate-list").replaceChildren();
+  const revision=tradeIntentRevision;
+  const intent={side:$("trade-side").value,token:selected.token,curve:selected.curve,wallet:walletAddress,amount:$("trade-amount").value.trim(),slippageBps:Number($("trade-slippage").value),acknowledgement:tradeAcknowledgement};
+  tradePreparing=true;
   try{
     await ensureRobinhoodChain();
-    const response=await fetch("/api/trade/prepare",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify({side:$("trade-side").value,token:selected.token,curve:selected.curve,wallet:walletAddress,amount:$("trade-amount").value.trim(),slippageBps:Number($("trade-slippage").value),acknowledgement:tradeAcknowledgement})});
+    if(revision!==tradeIntentRevision)return;
+    const response=await fetch("/api/trade/prepare",{method:"POST",credentials:"same-origin",headers:{accept:"application/json","content-type":"application/json"},body:JSON.stringify(intent)});
     const result=await response.json();if(!response.ok)throw new Error(`${result.code||"GATE_BLOCKED"}: ${result.error||`HTTP ${response.status}`}`);
+    if(revision!==tradeIntentRevision)return;
     preparedTrade=result;result.gates.forEach(gate=>{const li=document.createElement("li");li.textContent=`PASS / ${gate.id} — ${gate.detail}`;$("trade-gate-list").append(li)});
     $("trade-expected").textContent=`${readableUnits(result.expectedOut,result.outputDecimals)} ${result.side==="BUY"?"TOKEN":"ETH"}`;$("trade-minimum").textContent=`${readableUnits(result.minOut,result.outputDecimals)} ${result.side==="BUY"?"TOKEN":"ETH"}`;$("trade-fees").textContent=`${result.totalFeeBps} BPS`;$("trade-impact").textContent=`${result.priceImpactBps} BPS`;$("trade-expiry").textContent=`BLOCK ${result.expiresAfterBlock.toLocaleString()}`;
     $("send-trade").disabled=false;$("trade-result").textContent=`PREPARED ${result.auditId}. Review the wallet transaction before approving.`;
-  }catch(error){const li=document.createElement("li");li.className="blocked";li.textContent=String(error?.message||error).slice(0,180);$("trade-gate-list").append(li);$("trade-result").textContent="No transaction was prepared or submitted."}
-  finally{updateTradeControls()}
+  }catch(error){if(revision!==tradeIntentRevision)return;const li=document.createElement("li");li.className="blocked";li.textContent=String(error?.message||error).slice(0,180);$("trade-gate-list").append(li);$("trade-result").textContent="No transaction was prepared or submitted."}
+  finally{tradePreparing=false;updateTradeControls()}
 }
 async function sendPreparedTrade(){
-  if(!preparedTrade||!walletAddress)return;
+  if(tradeSending||!preparedTrade||!walletAuthenticated||!walletAddress||!$("trade-ack").checked)return;
+  const trade=preparedTrade,revision=tradeIntentRevision;
+  tradeSending=true;
   $("send-trade").disabled=true;$("trade-result").textContent="Opening the wallet's final transaction review…";
   try{
     const provider=await ensureRobinhoodChain();bindWalletProvider(provider);
-    const head=Number.parseInt(await provider.request({method:"eth_blockNumber"}),16);if(!Number.isSafeInteger(head)||head>preparedTrade.expiresAfterBlock)throw new Error("Quote expired. Run the execution gates again.");
-    const accounts=await provider.request({method:"eth_accounts"});if(!Array.isArray(accounts)||String(accounts[0]||"").toLowerCase()!==preparedTrade.wallet)throw new Error("Connected wallet changed. Run the execution gates again.");
-    const hash=await provider.request({method:"eth_sendTransaction",params:[preparedTrade.transaction]});if(typeof hash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(hash))throw new Error("Wallet returned an invalid transaction hash.");
+    const head=Number.parseInt(await provider.request({method:"eth_blockNumber"}),16);if(!Number.isSafeInteger(head)||head>trade.expiresAfterBlock)throw new Error("Quote expired. Run the execution gates again.");
+    const accounts=await provider.request({method:"eth_accounts"});if(!Array.isArray(accounts)||String(accounts[0]||"").toLowerCase()!==trade.wallet)throw new Error("Connected wallet changed. Run the execution gates again.");
+    if(revision!==tradeIntentRevision||preparedTrade!==trade||!$("trade-ack").checked)throw new Error("Trade intent changed. Run the execution gates again.");
+    const hash=await provider.request({method:"eth_sendTransaction",params:[trade.transaction]});if(typeof hash!=="string"||!/^0x[0-9a-fA-F]{64}$/.test(hash))throw new Error("Wallet returned an invalid transaction hash.");
     $("trade-result").textContent=`SUBMITTED ${short(hash,10)} · wallet-approved`;$("trade-tx").href=txExplorer(hash);$("trade-tx").hidden=false;preparedTrade=null;
-  }catch(error){$("trade-result").textContent=String(error?.message||error).slice(0,160);$("send-trade").disabled=false}
+  }catch(error){resetPreparedTrade(String(error?.message||error).slice(0,160))}
+  finally{tradeSending=false;updateTradeControls()}
 }
+
+window.GptheistDesk={async reviewOpportunity(token,side){
+  if(!["BUY","SELL"].includes(side)||tradeSending)throw new Error("Finish the current wallet review first.");
+  const revision=tradeIntentRevision;
+  const response=await fetch("/api/opportunities",{headers:{accept:"application/json"}});
+  if(!response.ok)throw new Error("Fresh market evidence is unavailable.");
+  const report=await response.json(),row=report.opportunities?.find(item=>item.token===token);
+  if(revision!==tradeIntentRevision)throw new Error("Trade selection changed. Select the opportunity again.");
+  if(!row||report.status==="STALE"||!row.observedAt||Date.now()-Date.parse(row.observedAt)>report.staleAfterMs||!(side==="BUY"?row.canReviewBuy:row.canReviewSell))throw new Error("This proposal is no longer eligible. Review the latest evidence.");
+  selectLaunch(row.launch);reviewToken=row.token;
+  $("trade-side").value=side;$("trade-amount").value="";$("trade-ack").checked=false;
+  resetPreparedTrade(`${side} review for ${row.launch.metadata.status==="DECLARED"?row.launch.metadata.symbol:short(row.token,8)}. Enter ${side==="BUY"?"ETH":"token units"}, acknowledge the trade, then run all gates.`);
+  $("trade-amount").placeholder=side==="BUY"?"ETH amount":"Token amount";
+  updateTradeControls();$("trade").scrollIntoView({behavior:"smooth",block:"start"});$("trade-amount").focus({preventScroll:true});
+}};
 
 document.querySelectorAll("[data-filter]").forEach(button=>button.addEventListener("click",()=>{activeFilter=button.dataset.filter;document.querySelectorAll("[data-filter]").forEach(item=>item.classList.toggle("active",item===button));if(latestSnapshot)renderFeed(latestSnapshot)}));
 $("connect-wallet").addEventListener("click",connectWallet);$("prepare-trade").addEventListener("click",prepareTrade);$("send-trade").addEventListener("click",sendPreparedTrade);$("setup-smart-account").addEventListener("click",setupSmartAccount);$("revoke-smart-account").addEventListener("click",revokeSmartAccount);["trade-side","trade-amount","trade-slippage","trade-ack"].forEach(id=>$(id).addEventListener("input",()=>{resetPreparedTrade("Trade intent changed. Run every execution gate again.");updateTradeControls()}));
