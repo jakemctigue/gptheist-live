@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { transactionSyncArgsFromEnv } from "../src/service.js";
+import { marketSyncArgsFromEnv, marketSyncEnabled, transactionSyncArgsFromEnv } from "../src/service.js";
 
 test("production sync uses the stable three-month MongoDB checkpoint at one-second cadence", () => {
   const args = transactionSyncArgsFromEnv({});
@@ -13,6 +13,19 @@ test("production sync uses the stable three-month MongoDB checkpoint at one-seco
     "--batch-size", "100",
     "--job-id", "robinhood-three-months"
   ]);
+});
+
+test("market sync defaults to a 48-hour Ethereum and Solana import followed by polling", () => {
+  assert.deepEqual(marketSyncArgsFromEnv({}).slice(1), [
+    "--hours", "48",
+    "--networks", "ethereum,solana",
+    "--evm-batch-size", "10",
+    "--follow",
+    "--poll-ms", "5000"
+  ]);
+  assert.equal(marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "true", ALCHEMY_API_KEY: "configured" }), true);
+  assert.equal(marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "false", ALCHEMY_API_KEY: "configured" }), false);
+  assert.throws(() => marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "yes" }), /must be true or false/);
 });
 
 test("production sync accepts explicit operational overrides without putting secrets in arguments", () => {

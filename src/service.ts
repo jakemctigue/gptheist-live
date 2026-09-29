@@ -8,6 +8,7 @@ const children = new Set<ChildProcess>();
 let shuttingDown = false;
 let syncRestart: NodeJS.Timeout | null = null;
 let paperRestart: NodeJS.Timeout | null = null;
+let marketRestart: NodeJS.Timeout | null = null;
 
 export function paperLedgerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = (env.PAPER_LEDGER_ENABLED ?? "true").trim().toLowerCase();
@@ -31,6 +32,27 @@ export function transactionSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env)
     "--batch-size", batchSize,
     "--job-id", jobId
   ];
+}
+
+export function marketSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  const hours = env.MARKET_IMPORT_HOURS?.trim() || "48";
+  const pollMs = env.MARKET_IMPORT_POLL_MS?.trim() || "5000";
+  const networks = env.MARKET_IMPORT_NETWORKS?.trim() || "ethereum,solana";
+  const evmBatchSize = env.MARKET_EVM_BATCH_SIZE?.trim() || "10";
+  return [
+    resolve(runtimeDirectory, "marketImport.js"),
+    "--hours", hours,
+    "--networks", networks,
+    "--evm-batch-size", evmBatchSize,
+    "--follow",
+    "--poll-ms", pollMs
+  ];
+}
+
+export function marketSyncEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = (env.MARKET_TRANSACTION_SYNC_ENABLED ?? "false").trim().toLowerCase();
+  if (value !== "true" && value !== "false") throw new Error("MARKET_TRANSACTION_SYNC_ENABLED must be true or false");
+  return value === "true" && Boolean(env.ALCHEMY_API_KEY?.trim() || (env.ETHEREUM_RPC_URL?.trim() && env.SOLANA_RPC_URL?.trim()));
 }
 
 function syncEnabled(env: NodeJS.ProcessEnv): boolean {
@@ -76,11 +98,23 @@ function launchPaper(): void {
   });
 }
 
+function launchMarketSync(): void {
+  const child = spawn(process.execPath, marketSyncArgsFromEnv(), { env: process.env, stdio: "inherit" });
+  children.add(child);
+  child.once("exit", (code) => {
+    children.delete(child);
+    if (shuttingDown) return;
+    process.stderr.write(`Market transaction sync exited with code ${String(code ?? 1)}; restarting from MongoDB checkpoints in 5 seconds.\n`);
+    marketRestart = setTimeout(launchMarketSync, 5_000);
+  });
+}
+
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   if (syncRestart) clearTimeout(syncRestart);
   if (paperRestart) clearTimeout(paperRestart);
+  if (marketRestart) clearTimeout(marketRestart);
   for (const child of children) child.kill("SIGTERM");
   const forceExit = setTimeout(() => {
     for (const child of children) child.kill("SIGKILL");
@@ -100,6 +134,10 @@ export function startService(): void {
     const store = process.env.PAPER_LEDGER_STORE?.trim().toLowerCase() || (process.env.MONGODB_URI?.trim() ? "mongodb" : "file");
     process.stdout.write(`PAPER LEDGER — enabled; storing in ${store === "mongodb" ? "MongoDB" : "a local file that does not survive redeploys"}.\n`);
     launchPaper();
+  }
+  if (marketSyncEnabled(process.env)) {
+    process.stdout.write("MARKET TRANSACTION SYNC — enabled; backfilling 48 hours and following Ethereum and Solana checkpoints.\n");
+    launchMarketSync();
   }
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

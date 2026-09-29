@@ -33,7 +33,7 @@
     "SECURITY.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-browser.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/build-browser.mjs",
     "start": "node dist/src/service.js",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "demo": "npm run build --silent && node dist/src/cli.js demo",
@@ -41,6 +41,9 @@
     "transactions:plan": "npm run build --silent && node dist/src/transactionImport.js --plan",
     "transactions:import": "npm run build --silent && node dist/src/transactionImport.js",
     "transactions:sync": "npm run build --silent && node dist/src/transactionImport.js --scope pons-launches --follow --poll-ms 1000 --confirmations 1 --batch-size 100 --job-id robinhood-three-months",
+    "markets:plan": "npm run build --silent && node dist/src/marketImport.js --plan --hours 48",
+    "markets:import": "npm run build --silent && node dist/src/marketImport.js --hours 48",
+    "markets:sync": "npm run build --silent && node dist/src/marketImport.js --hours 48 --follow --poll-ms 5000",
     "desk": "npm run build --silent && node dist/src/cli.js desk",
     "paper": "npm run build --silent && node dist/src/cli.js paper",
     "paper:report": "npm run build --silent && node dist/src/cli.js paper report",
