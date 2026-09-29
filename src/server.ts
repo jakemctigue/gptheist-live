@@ -8,6 +8,7 @@ import { preparePonsTrade, publicTradePolicy, TradeGateError, tradePolicyFromEnv
 import { normalizedWallet, WalletAuth, WalletAuthError } from "./walletAuth.js";
 import { aiProviderConfigFromEnv, publicAiProviderStatus, type AiProviderConfig } from "./providerConfig.js";
 import { SmartAccountCoordinator, SmartAccountError } from "./smartAccount.js";
+import { planPaperBook } from "./paper.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
@@ -529,6 +530,20 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
           send(response, 502, "application/json; charset=utf-8", JSON.stringify({ status: "UNAVAILABLE", error: message }));
         } finally {
           clearTimeout(socialTimer);
+        }
+        return;
+      }
+      if (path === "/api/paper") {
+        try {
+          const current = await snapshot();
+          const book = planPaperBook(current.launches, tradePolicy, smartAccounts.sessionAddress(), {
+            chainId: current.chainId,
+            headBlock: current.headBlock
+          });
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(book), { "cache-control": "no-store" });
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message.slice(0, 200) : "upstream unavailable";
+          send(response, 502, "application/json; charset=utf-8", JSON.stringify({ error: message, mode: "paper-only", executed: false }));
         }
         return;
       }

@@ -117,7 +117,30 @@ function render(snapshot){
   renderFeed(snapshot);
 }
 
-async function sync(){try{const response=await fetch("/api/snapshot",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);render(await response.json())}catch(error){$("pulse").classList.remove("online");$("sync").textContent="RETRYING";$("block").textContent="OFFLINE";$("updated").textContent=String(error.message||error).slice(0,70)}}
+function renderPaper(book){
+  const account=book.account?.address?`ALCHEMY SESSION ${short(book.account.address,8)}`:"ALCHEMY SESSION NOT CONFIGURED";
+  $("paper-account").textContent=account;
+  $("paper-summary").textContent=`Paper only · executed=${book.executed} · ${book.positions.length} open of ${book.considered} considered. ${book.rules[book.rules.length-1]}`;
+  const list=$("paper-book");
+  list.replaceChildren();
+  if(!book.positions.length){const empty=document.createElement("li");empty.textContent="No launch currently passes the paper rules.";list.append(empty);return}
+  for(const position of book.positions){
+    const item=document.createElement("li");
+    const name=document.createElement("strong");
+    name.textContent=`${position.side} ${position.symbol}`;
+    const detail=document.createElement("span");
+    detail.textContent=`score ${position.score} · curve ${pct(position.progressBps)} · ${position.reasons[2]||""}`;
+    const size=document.createElement("em");
+    size.textContent=`${formatWei(position.sizeWei)} · NOT SENT`;
+    item.append(name,detail,size);
+    list.append(item);
+  }
+}
+async function syncPaper(){
+  try{const response=await fetch("/api/paper",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);renderPaper(await response.json())}
+  catch(error){if($("paper-account"))$("paper-account").textContent="PAPER UNAVAILABLE";if($("paper-summary"))$("paper-summary").textContent=String(error.message||error).slice(0,120)}
+}
+async function sync(){try{const response=await fetch("/api/snapshot",{headers:{accept:"application/json"}});if(!response.ok)throw new Error(`HTTP ${response.status}`);render(await response.json());await syncPaper()}catch(error){$("pulse").classList.remove("online");$("sync").textContent="RETRYING";$("block").textContent="OFFLINE";$("updated").textContent=String(error.message||error).slice(0,70)}}
 
 const tradeAcknowledgement="I UNDERSTAND THIS SUBMITS A REAL TRADE";
 const txExplorer=(hash)=>`https://robinhoodchain.blockscout.com/tx/${hash}`;
