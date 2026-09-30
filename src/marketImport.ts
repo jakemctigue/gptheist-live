@@ -13,6 +13,7 @@ const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_ETHEREUM_CONFIRMATIONS = 12;
 const DEFAULT_EVM_BATCH_SIZE = 50;
 const DEFAULT_SOLANA_PAGE_SIZE = 1_000;
+const SOLANA_HISTORY_PAGE_STRIDE = 5;
 const MAX_RETRIES = 6;
 const RETENTION_SECONDS = 93 * 24 * 60 * 60;
 
@@ -637,11 +638,13 @@ async function backfillSolanaProgram(
     const entries = result.filter(solanaSignature);
     if (!newestSignature && entries[0]) newestSignature = entries[0].signature;
     const inRange = entries.filter((entry) => entry.blockTime !== null && entry.blockTime * 1_000 >= effectiveSince.getTime() && entry.err === null);
-    const sampled = sampleSolanaSignatures(inRange);
-    storedTransactions += await storeSolanaTransactions(rpc, transactions, [...sampled].reverse(), protocol, marketAddress, "backfill");
-    page += 1;
     const oldest = entries.at(-1);
     const complete = entries.length < options.solanaPageSize || !oldest || oldest.blockTime === null || oldest.blockTime * 1_000 < effectiveSince.getTime();
+    const sampled = page % SOLANA_HISTORY_PAGE_STRIDE === 0 || complete
+      ? sampleSolanaSignatures(inRange).map((entry) => ({ ...entry, sampleWeight: (entry.sampleWeight ?? 1) * (complete ? 1 : SOLANA_HISTORY_PAGE_STRIDE) }))
+      : [];
+    storedTransactions += await storeSolanaTransactions(rpc, transactions, [...sampled].reverse(), protocol, marketAddress, "backfill");
+    page += 1;
     before = oldest?.signature;
     await checkpoints.updateOne({ _id: checkpointId }, { $set: {
       network: "solana", protocol, marketAddress, since: effectiveSince,
