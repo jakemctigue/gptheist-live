@@ -759,10 +759,9 @@ export async function runMarketImport(args: string[]): Promise<void> {
     const solanaCheckpoints = database.collection<SolanaCheckpoint>("market_ingestion_checkpoints");
     const importSolana = async (): Promise<void> => {
       if (!solanaRpc) return;
-      for (const [protocol, marketAddress] of Object.entries(markets)) {
-        if (interrupted) break;
-        await backfillSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, marketAddress);
-      }
+      await Promise.all(Object.entries(markets).map(async ([protocol, marketAddress]) => {
+        if (!interrupted) await backfillSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, marketAddress);
+      }));
     };
     await Promise.all([
       ethereumRpc ? importEthereum(ethereumRpc, transactions, evmCheckpoints, options, since) : Promise.resolve(),
@@ -771,10 +770,9 @@ export async function runMarketImport(args: string[]): Promise<void> {
     while (options.follow && !interrupted) {
       const followSolana = async (): Promise<void> => {
         if (!solanaRpc) return;
-        for (const [protocol, marketAddress] of Object.entries(markets)) {
-          if (interrupted) break;
-          await followSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, marketAddress);
-        }
+        await Promise.all(Object.entries(markets).map(async ([protocol, marketAddress]) => {
+          if (!interrupted) await followSolanaProgram(solanaRpc, transactions, solanaCheckpoints, options, since, protocol, marketAddress);
+        }));
       };
       await Promise.all([
         ethereumRpc ? importEthereum(ethereumRpc, transactions, evmCheckpoints, options, since, true) : Promise.resolve(),
