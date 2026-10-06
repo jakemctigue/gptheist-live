@@ -8,6 +8,22 @@ const children = new Set<ChildProcess>();
 let shuttingDown = false;
 let syncRestart: NodeJS.Timeout | null = null;
 let paperRestart: NodeJS.Timeout | null = null;
+let researchRestart: NodeJS.Timeout | null = null;
+
+export function researchWorkerEnabled(env: NodeJS.ProcessEnv): boolean {
+  const value = (env.RESEARCH_ENABLED ?? "false").trim().toLowerCase();
+  if (value !== "true" && value !== "false") throw new Error("RESEARCH_ENABLED must be true or false");
+  return value === "true";
+}
+
+function launchResearch(): void {
+  const child = spawn(process.execPath, [resolve(runtimeDirectory, "research.js")], { env: process.env, stdio: "inherit" });
+  children.add(child);
+  child.once("exit", () => {
+    children.delete(child);
+    if (!shuttingDown) researchRestart = setTimeout(launchResearch, 60_000);
+  });
+}
 
 export function transactionSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   const pollMs = env.ROBINHOOD_POLL_MS?.trim() || "1000";
@@ -88,6 +104,7 @@ function shutdown(): void {
   shuttingDown = true;
   if (syncRestart) clearTimeout(syncRestart);
   if (paperRestart) clearTimeout(paperRestart);
+  if (researchRestart) clearTimeout(researchRestart);
   for (const child of children) child.kill("SIGTERM");
   const forceExit = setTimeout(() => {
     for (const child of children) child.kill("SIGKILL");
@@ -96,6 +113,7 @@ function shutdown(): void {
 }
 
 export function startService(): void {
+  const enableResearch = researchWorkerEnabled(process.env);
   launchDesk();
   if (syncEnabled(process.env)) {
     process.stdout.write("TRANSACTION SYNC — enabled; MongoDB checkpoint robinhood-three-months will resume automatically.\n");
@@ -111,6 +129,7 @@ export function startService(): void {
   }
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+  if (enableResearch) launchResearch();
 }
 
 const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
