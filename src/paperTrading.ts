@@ -2,9 +2,10 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MongoClient, type Collection, type Db, type Document } from "mongodb";
+import { MongoClient, type ClientSession, type Collection, type Db, type Document } from "mongodb";
 import { ROBINHOOD_CHAIN_ID, type LiveLaunch, type RpcCaller } from "./live.js";
 import { assessPonsLaunch, readPonsLaunchResearch, type VerifiedPonsMarketState } from "./market.js";
+import { createPaperRpcCaller, createPaperEthUsdPriceReader, paperRpcUrlsFromEnv, type PaperEthUsdPrice } from "./paperDataFeeds.js";
 
 const RUN_ID = "paper-month-v1";
 const STRATEGY_VERSION = "pons-forward-v1";
@@ -65,6 +66,11 @@ interface PaperRun extends Document {
   startedAt: Date;
   endsAt: Date;
   lastTickAt: Date | null;
+  lastAttemptAt?: Date | null;
+  lastSuccessfulTickAt?: Date | null;
+  lastEthUsdPrice?: PaperEthUsdPrice;
+  lastMarketDataAt?: Date | null;
+  tickDisposition?: "OBSERVED" | "DAILY_ENTRY_LIMIT" | "MONTH_END_FLAT";
   lastEntryAt: Date | null;
   completedAt: Date | null;
   lastError: string | null;
@@ -93,6 +99,7 @@ interface PaperPosition extends Document {
   entryPriceImpactBps: number;
   modeledSlippageBps: number;
   lastMarkAt: Date | null;
+  lastMarkAttemptAt?: Date | null;
   lastMarkUsdMicros: number;
   lastMarkReturnBps: number | null;
   lastMarkStatus: "PENDING" | "AVAILABLE" | "UNAVAILABLE";
@@ -289,90 +296,6 @@ export function simulatePaperMonth(
   };
 }
 
-function rpcUrlFromEnvironment(env: NodeJS.ProcessEnv): string {
-  const explicit = env.ROBINHOOD_RPC_URL?.split(",")[0]?.trim().replace(/#nologs$/, "");
-  if (explicit) {
-    if (!/^https:\/\//i.test(explicit)) throw new Error("ROBINHOOD_RPC_URL must use HTTPS");
-    return explicit;
-  }
-  const key = env.ALCHEMY_API_KEY?.trim();
-  if (!key || !/^[A-Za-z0-9_-]{10,200}$/.test(key)) throw new Error("PAPER_TRADING requires a valid ALCHEMY_API_KEY");
-  return `https://robinhood-mainnet.g.alchemy.com/v2/${key}`;
-}
-
-function createPaperRpcCaller(url: string, fetcher: typeof fetch = fetch): RpcCaller {
-  const allowed = new Set(["eth_chainId", "eth_blockNumber", "eth_call", "eth_gasPrice"]);
-  let requestId = 0;
-  return async (method, params = []) => {
-    if (!allowed.has(method)) throw new Error(`Paper RPC method is not permitted: ${method}`);
-    let lastError = "RPC request failed";
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15_000);
-      try {
-        const response = await fetcher(url, {
-          method: "POST",
-          headers: { "content-type": "application/json", "user-agent": "gptheist/1.2 paper-only" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: ++requestId, method, params }),
-          signal: controller.signal
-        });
-        const payload = await response.json() as { result?: unknown; error?: { message?: string } };
-        if (response.status === 429 || response.status >= 500) {
-          lastError = `RPC HTTP ${response.status}`;
-        } else if (!response.ok) {
-          throw new Error(`RPC HTTP ${response.status}`);
-        } else if (payload.error) {
-          throw new Error(payload.error.message ?? "RPC error");
-        } else if (!("result" in payload)) {
-          throw new Error("RPC response is missing result");
-        } else {
-          return payload.result;
-        }
-      } catch (error: unknown) {
-        lastError = error instanceof Error ? error.message : lastError;
-      } finally {
-        clearTimeout(timer);
-      }
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 300 * 2 ** attempt));
-    }
-    throw new Error(`${method} failed after bounded retries: ${lastError.slice(0, 160)}`);
-  };
-}
-
-function alchemyKey(env: NodeJS.ProcessEnv): string {
-  const key = env.ALCHEMY_API_KEY?.trim();
-  if (!key || !/^[A-Za-z0-9_-]{10,200}$/.test(key)) throw new Error("PAPER_TRADING requires ALCHEMY_API_KEY for ETH/USD marks");
-  return key;
-}
-
-async function fetchEthUsdMicros(env: NodeJS.ProcessEnv, fetcher: typeof fetch = fetch): Promise<number> {
-  const key = alchemyKey(env);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12_000);
-  try {
-    const response = await fetcher(`https://api.g.alchemy.com/prices/v1/${key}/tokens/by-symbol?symbols=ETH`, {
-      headers: { accept: "application/json", "user-agent": "gptheist/1.2 paper-only" },
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`Alchemy Prices HTTP ${response.status}`);
-    const payload = await response.json() as {
-      data?: Array<{ prices?: Array<{ currency?: string; value?: string; lastUpdatedAt?: string }> }>;
-    };
-    const price = payload.data?.[0]?.prices?.find((candidate) => candidate.currency?.toLowerCase() === "usd");
-    const numeric = price?.value === undefined ? Number.NaN : Number(price.value);
-    if (!Number.isFinite(numeric) || numeric <= 0 || numeric > 1_000_000) throw new Error("Alchemy returned an invalid ETH/USD price");
-    if (price?.lastUpdatedAt) {
-      const updatedAt = Date.parse(price.lastUpdatedAt);
-      if (!Number.isFinite(updatedAt) || Math.abs(Date.now() - updatedAt) > 15 * 60_000) {
-        throw new Error("Alchemy returned a stale ETH/USD price");
-      }
-    }
-    return Math.round(numeric * USD_MICROS);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function parseHexBigInt(value: unknown, label: string): bigint {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error(`${label} is invalid`);
   return BigInt(value);
@@ -391,9 +314,9 @@ function usdMicrosToWei(usdMicros: number, ethUsdMicros: number): bigint {
   return BigInt(usdMicros) * WEI_PER_ETH / BigInt(ethUsdMicros);
 }
 
-function safeError(error: unknown, env: NodeJS.ProcessEnv): string {
+export function safePaperError(error: unknown, env: NodeJS.ProcessEnv): string {
   let message = error instanceof Error ? error.message : "unknown paper-trading error";
-  for (const secret of [env.MONGODB_URI, env.ROBINHOOD_RPC_URL, env.ALCHEMY_API_KEY]) {
+  for (const secret of [env.MONGODB_URI, ...(env.ROBINHOOD_RPC_URL?.split(",").map((url) => url.trim()) ?? []), env.ALCHEMY_API_KEY, env.DRPC_API_KEY, env.DRPC_ETHEREUM_RPC_URL, env.DRPC_SOLANA_RPC_URL]) {
     if (secret && secret.length >= 8) message = message.split(secret).join("<redacted>");
   }
   return message
@@ -402,14 +325,66 @@ function safeError(error: unknown, env: NodeJS.ProcessEnv): string {
     .slice(0, 240);
 }
 
-function collections(database: Db): {
+export interface PaperLeaseFence {
+  renew(): Promise<void>;
+  write<T>(operation: (session: ClientSession) => Promise<T>): Promise<T>;
+}
+
+export class PaperLeaseLostError extends Error {
+  constructor() { super("Paper worker lease expired or changed owner; ledger write rejected"); }
+}
+
+export function createPaperLeaseFence(
+  client: MongoClient, runs: Collection<PaperRun>, owner: string, clock: () => Date = () => new Date()
+): PaperLeaseFence {
+  async function renew(session?: ClientSession): Promise<void> {
+    const now = clock();
+    const result = await runs.updateOne({
+      _id: RUN_ID, status: "RUNNING", leaseOwner: owner, leaseExpiresAt: { $gt: now }
+    }, { $set: { leaseExpiresAt: new Date(now.getTime() + LEASE_MS) } }, session ? { session } : {});
+    if (result.matchedCount !== 1) throw new PaperLeaseLostError();
+  }
+  return {
+    renew: () => renew(),
+    async write<T>(operation: (session: ClientSession) => Promise<T>): Promise<T> {
+      const session = client.startSession();
+      try {
+        // Touch the lease and ledger in one transaction: a competing acquisition
+        // conflicts with this lease write rather than racing between check and insert.
+        return await session.withTransaction(async () => {
+          await renew(session);
+          return operation(session);
+        }, { maxCommitTimeMS: 10_000, writeConcern: { w: "majority" } });
+      } finally { await session.endSession(); }
+    }
+  };
+}
+
+export function paperCollectionWithLease<T extends Document>(collection: Collection<T>, lease?: PaperLeaseFence): Collection<T> {
+  if (!lease) return collection;
+  return new Proxy(collection, {
+    get(target, property) {
+      const member: unknown = Reflect.get(target, property);
+      if (property === "updateOne" || property === "insertOne") {
+        return (...args: unknown[]) => lease.write(async (session) => {
+          const optionsIndex = property === "updateOne" ? 2 : 1;
+          args[optionsIndex] = { ...(args[optionsIndex] as Record<string, unknown> | undefined), session };
+          return Reflect.apply(member as (...parameters: unknown[]) => Promise<unknown>, target, args);
+        });
+      }
+      return typeof member === "function" ? member.bind(target) : member;
+    }
+  });
+}
+
+function collections(database: Db, lease?: PaperLeaseFence): {
   runs: Collection<PaperRun>;
   positions: Collection<PaperPosition>;
   transactions: Collection<StoredLaunchTransaction>;
 } {
   return {
-    runs: database.collection<PaperRun>("paper_trade_runs"),
-    positions: database.collection<PaperPosition>("paper_trade_positions"),
+    runs: paperCollectionWithLease(database.collection<PaperRun>("paper_trade_runs"), lease),
+    positions: paperCollectionWithLease(database.collection<PaperPosition>("paper_trade_positions"), lease),
     transactions: database.collection<StoredLaunchTransaction>("robinhood_transactions")
   };
 }
@@ -482,13 +457,30 @@ function sameUtcDay(left: Date, right: Date): boolean {
   return left.toISOString().slice(0, 10) === right.toISOString().slice(0, 10);
 }
 
+export function paperTickNeedsMarketData(endsAt: Date, now: Date, hasOpenPosition: boolean, lastEntryAt: Date | null): boolean {
+  if (hasOpenPosition) return true;
+  if (now >= endsAt) return false;
+  return lastEntryAt === null || !sameUtcDay(lastEntryAt, now);
+}
+
+export function initialPaperMarkUsdMicros(
+  quoteReserve: string, tokenReserve: string, tokenAmount: string,
+  feeBps: number, slippageBps: number, gasWei: bigint, ethUsdMicros: number
+): number {
+  // Match subsequent marks at observed reserves: paper buys do not alter the real pool.
+  const sell = quotePaperSell(quoteReserve, tokenReserve, tokenAmount, feeBps, slippageBps);
+  const proceedsWei = BigInt(sell.modeledQuoteOutWei);
+  return weiToUsdMicros(proceedsWei > gasWei ? proceedsWei - gasWei : 0n, ethUsdMicros);
+}
+
 async function candidateLaunches(
   transactions: Collection<StoredLaunchTransaction>,
   since: Date,
+  until: Date,
   limit: number
 ): Promise<CandidateLaunch[]> {
   const documents = await transactions.find({
-    timestamp: { $gte: since },
+    timestamp: { $gte: since, $lte: until },
     "ponsLaunches.0": { $exists: true }
   }, {
     projection: { _id: 0, timestamp: 1, blockNumber: 1, ponsLaunches: 1 }
@@ -496,6 +488,7 @@ async function candidateLaunches(
   const seen = new Set<string>();
   const result: CandidateLaunch[] = [];
   for (const document of documents) {
+    if (!(document.timestamp instanceof Date) || document.timestamp < since || document.timestamp > until) continue;
     for (const launch of document.ponsLaunches) {
       const key = `${launch.transactionHash}:${launch.logIndex}`;
       if (seen.has(key)) continue;
@@ -522,14 +515,15 @@ async function openPosition(
   now: Date,
   headHex: string,
   gasPriceWei: bigint,
-  ethUsdMicros: number
+  ethUsdMicros: number,
+  lease?: PaperLeaseFence
 ): Promise<void> {
-  const { positions, transactions } = collections(database);
+  const { positions, transactions } = collections(database, lease);
   const latest = await positions.find({ runId: RUN_ID }).sort({ openedAt: -1 }).limit(1).next();
   if (latest && sameUtcDay(latest.openedAt, now)) return;
   if (await positions.findOne({ runId: RUN_ID, status: "OPEN" })) return;
   const since = new Date(Math.max(run.startedAt.getTime(), now.getTime() - config.candidateMaxAgeMs));
-  const candidates = await candidateLaunches(transactions, since, config.maxCandidatesPerTick);
+  const candidates = await candidateLaunches(transactions, since, now, config.maxCandidatesPerTick);
   for (const candidate of candidates) {
     const launch = candidate.launch;
     if (candidate.timestamp < since || launch.pairToken !== ZERO_ADDRESS) continue;
@@ -556,6 +550,10 @@ async function openPosition(
     const entryGasUsdMicros = weiToUsdMicros(gasPriceWei * BigInt(config.modeledGasUnits), ethUsdMicros);
     const entryDebitUsdMicros = entryNotionalUsdMicros + entryGasUsdMicros;
     if (entryDebitUsdMicros > run.cashUsdMicros) continue;
+    const initialMark = initialPaperMarkUsdMicros(
+      research.market.quoteReserve, research.market.tokenReserve, quote.modeledTokenOut,
+      feeBps, config.modeledSlippageBps, gasPriceWei * BigInt(config.modeledGasUnits), ethUsdMicros
+    );
     const position: PaperPosition = {
       _id: id,
       runId: RUN_ID,
@@ -575,10 +573,11 @@ async function openPosition(
       entryFeeBps: feeBps,
       entryPriceImpactBps: quote.priceImpactBps,
       modeledSlippageBps: config.modeledSlippageBps,
-      lastMarkAt: null,
-      lastMarkUsdMicros: 0,
-      lastMarkReturnBps: null,
-      lastMarkStatus: "PENDING",
+      lastMarkAt: now,
+      lastMarkAttemptAt: now,
+      lastMarkUsdMicros: initialMark,
+      lastMarkReturnBps: Math.trunc((initialMark - entryDebitUsdMicros) * 10_000 / entryDebitUsdMicros),
+      lastMarkStatus: "AVAILABLE",
       lastMarkError: null,
       exitProceedsUsdMicros: null,
       realizedPnlUsdMicros: null
@@ -622,17 +621,19 @@ async function markOpenPosition(
   headHex: string,
   gasPriceWei: bigint,
   ethUsdMicros: number,
-  monthEnded: boolean
+  monthEnded: boolean,
+  lease?: PaperLeaseFence
 ): Promise<void> {
-  const { positions } = collections(database);
+  const { positions } = collections(database, lease);
   const research = (await readPonsLaunchResearch(rpc, [position.launch], headHex))[0];
   if (!research || research.market.status !== "VERIFIED" || research.market.phase !== "CURVE") {
     const reason = !research ? "market research missing" : research.market.status !== "VERIFIED"
       ? research.market.reason : `curve valuation unavailable in ${research.market.phase} phase`;
     await positions.updateOne({ _id: position._id, status: "OPEN" }, {
-      $set: { lastMarkAt: now, lastMarkStatus: "UNAVAILABLE", lastMarkError: reason.slice(0, 160) }
+      $set: { lastMarkAttemptAt: now, lastMarkStatus: "UNAVAILABLE", lastMarkError: reason.slice(0, 160) }
     });
     if (monthEnded) await closePosition(positions, position, position.lastMarkUsdMicros, "MONTH_END_STALE_MARK", now);
+    else throw new Error(`Open paper position could not be marked: ${reason.slice(0, 160)}`);
     return;
   }
   const feeBps = totalFeeBps(research.market);
@@ -658,6 +659,7 @@ async function markOpenPosition(
   await positions.updateOne({ _id: position._id, status: "OPEN" }, {
     $set: {
       lastMarkAt: now,
+      lastMarkAttemptAt: now,
       lastMarkUsdMicros: markUsdMicros,
       lastMarkReturnBps: returnBps,
       lastMarkStatus: "AVAILABLE",
@@ -677,7 +679,8 @@ async function refreshRunTotals(
   positions: Collection<PaperPosition>,
   run: PaperRun,
   now: Date,
-  status: PaperRun["status"] = run.status
+  status: PaperRun["status"] = run.status,
+  recordTick = true
 ): Promise<void> {
   const entries = await positions.find({ runId: RUN_ID }).sort({ openedAt: 1 }).toArray();
   let cash = run.startingUsdMicros;
@@ -716,23 +719,38 @@ async function refreshRunTotals(
       closedTradeCount: closed,
       winCount: wins,
       lossCount: losses,
-      lastTickAt: now,
+      ...(recordTick ? { lastTickAt: now, lastAttemptAt: now, lastSuccessfulTickAt: now, lastError: null } : {}),
       lastEntryAt,
-      completedAt: status === "COMPLETE" ? now : null,
-      lastError: null
+      completedAt: status === "COMPLETE" ? now : null
     }
   });
 }
 
-async function paperTick(
+export async function paperTick(
   database: Db,
   rpc: RpcCaller,
   run: PaperRun,
   config: PaperTradingConfig,
-  env: NodeJS.ProcessEnv,
-  now: Date
+  readEthUsdPrice: () => Promise<PaperEthUsdPrice>,
+  now: Date,
+  lease?: PaperLeaseFence
 ): Promise<PaperRun["status"]> {
-  const { runs, positions } = collections(database);
+  await lease?.renew();
+  const { runs, positions } = collections(database, lease);
+  const transport = rpc;
+  rpc = async (method, params) => {
+    await lease?.renew();
+    return transport(method, params);
+  };
+  const monthEnded = now >= run.endsAt;
+  const open = await positions.findOne({ runId: RUN_ID, status: "OPEN" });
+  const latestEntry = await positions.find({ runId: RUN_ID }).sort({ openedAt: -1 }).limit(1).next();
+  if (!paperTickNeedsMarketData(run.endsAt, now, Boolean(open), latestEntry?.openedAt ?? null)) {
+    const status = monthEnded ? "COMPLETE" : "RUNNING";
+    await runs.updateOne({ _id: RUN_ID }, { $set: { tickDisposition: monthEnded ? "MONTH_END_FLAT" : "DAILY_ENTRY_LIMIT" } });
+    await refreshRunTotals(runs, positions, run, now, status);
+    return status;
+  }
   const chainHex = await rpc("eth_chainId");
   if (typeof chainHex !== "string" || Number.parseInt(chainHex.slice(2), 16) !== ROBINHOOD_CHAIN_ID) {
     throw new Error(`Paper RPC must be Robinhood Chain mainnet (${ROBINHOOD_CHAIN_ID})`);
@@ -740,21 +758,22 @@ async function paperTick(
   const headHex = await rpc("eth_blockNumber");
   if (typeof headHex !== "string" || !/^0x[0-9a-fA-F]+$/.test(headHex)) throw new Error("Paper RPC returned an invalid head block");
   const gasPriceWei = parseHexBigInt(await rpc("eth_gasPrice"), "eth_gasPrice");
-  const ethUsdMicros = await fetchEthUsdMicros(env);
-  const monthEnded = now >= run.endsAt;
-  const open = await positions.findOne({ runId: RUN_ID, status: "OPEN" });
-  if (open) await markOpenPosition(database, rpc, open, config, now, headHex, gasPriceWei, ethUsdMicros, monthEnded);
+  const price = await readEthUsdPrice();
+  const ethUsdMicros = price.usdMicros;
+  await runs.updateOne({ _id: RUN_ID }, { $set: { lastEthUsdPrice: price } });
+  if (open) await markOpenPosition(database, rpc, open, config, now, headHex, gasPriceWei, ethUsdMicros, monthEnded, lease);
   if (!monthEnded && !(await positions.findOne({ runId: RUN_ID, status: "OPEN" }))) {
     const current = await runs.findOne({ _id: RUN_ID });
     if (!current) throw new Error("Paper run disappeared during its tick");
-    await refreshRunTotals(runs, positions, current, now);
+    await refreshRunTotals(runs, positions, current, now, current.status, false);
     const refreshed = await runs.findOne({ _id: RUN_ID });
     if (!refreshed) throw new Error("Paper run totals could not be refreshed");
-    await openPosition(database, rpc, refreshed, config, now, headHex, gasPriceWei, ethUsdMicros);
+    await openPosition(database, rpc, refreshed, config, now, headHex, gasPriceWei, ethUsdMicros, lease);
   }
   const latestRun = await runs.findOne({ _id: RUN_ID });
   if (!latestRun) throw new Error("Paper run could not be reloaded");
   const status: PaperRun["status"] = monthEnded ? "COMPLETE" : "RUNNING";
+  await runs.updateOne({ _id: RUN_ID }, { $set: { lastMarketDataAt: now, tickDisposition: "OBSERVED" } });
   await refreshRunTotals(runs, positions, latestRun, now, status);
   return status;
 }
@@ -784,6 +803,8 @@ function publicPosition(position: PaperPosition): Record<string, unknown> {
     lastMarkUsd: position.lastMarkUsdMicros / USD_MICROS,
     lastMarkReturnBps: position.lastMarkReturnBps,
     markStatus: position.lastMarkStatus,
+    lastMarkAt: position.lastMarkAt,
+    lastMarkAttemptAt: position.lastMarkAttemptAt ?? null,
     markError: position.lastMarkError,
     exitProceedsUsd: position.exitProceedsUsdMicros === null ? null : position.exitProceedsUsdMicros / USD_MICROS,
     realizedPnlUsd: position.realizedPnlUsdMicros === null ? null : position.realizedPnlUsdMicros / USD_MICROS
@@ -825,6 +846,11 @@ export async function readPaperTradingStatus(env: NodeJS.ProcessEnv = process.en
       wins: run.winCount,
       losses: run.lossCount,
       lastTickAt: run.lastTickAt,
+      lastAttemptAt: run.lastAttemptAt ?? null,
+      lastSuccessfulTickAt: run.lastSuccessfulTickAt ?? null,
+      lastEthUsdPrice: run.lastEthUsdPrice ?? null,
+      lastMarketDataAt: run.lastMarketDataAt ?? null,
+      tickDisposition: run.tickDisposition ?? null,
       lastError: run.lastError,
       strategy: run.strategy,
       positions: recent.map(publicPosition)
@@ -856,8 +882,17 @@ export async function runPaperTrading(env: NodeJS.ProcessEnv = process.env): Pro
     return;
   }
   const { uri, databaseName } = mongoConfiguration(env);
-  const rpc = createPaperRpcCaller(rpcUrlFromEnvironment(env));
-  alchemyKey(env);
+  // Initialize only when a tick actually needs feeds (a flat expired run can finish offline).
+  let activeRpc: RpcCaller | undefined;
+  const rpc: RpcCaller = (method, params) => {
+    activeRpc ??= createPaperRpcCaller(paperRpcUrlsFromEnv(env));
+    return activeRpc(method, params);
+  };
+  let activePriceReader: (() => Promise<PaperEthUsdPrice>) | undefined;
+  const readPrice = (): Promise<PaperEthUsdPrice> => {
+    activePriceReader ??= createPaperEthUsdPriceReader(env);
+    return activePriceReader();
+  };
   const client = new MongoClient(uri, { appName: "gptheist-paper-month" });
   const owner = randomUUID();
   const controller = new AbortController();
@@ -870,6 +905,8 @@ export async function runPaperTrading(env: NodeJS.ProcessEnv = process.env): Pro
     await database.command({ ping: 1 });
     await ensureStorage(database);
     const { runs } = collections(database);
+    const lease = createPaperLeaseFence(client, runs, owner);
+    const fencedRuns = paperCollectionWithLease(runs, lease);
     await ensureRun(runs, config, new Date());
     process.stdout.write(`${JSON.stringify({ event: "paper-start", runId: RUN_ID, mode: "paper-only", startingUsd: config.startingUsdMicros / USD_MICROS, durationDays: config.durationDays })}\n`);
     while (!controller.signal.aborted) {
@@ -882,13 +919,19 @@ export async function runPaperTrading(env: NodeJS.ProcessEnv = process.env): Pro
         continue;
       }
       try {
-        const status = await paperTick(database, rpc, leased, config, env, now);
+        const status = await paperTick(database, rpc, leased, config, readPrice, now, lease);
         const refreshed = await runs.findOne({ _id: RUN_ID });
         process.stdout.write(`${JSON.stringify({ event: "paper-tick", status, at: now.toISOString(), equityUsd: refreshed ? refreshed.equityUsdMicros / USD_MICROS : null, entries: refreshed?.entryCount ?? null })}\n`);
         if (status === "COMPLETE") break;
       } catch (error: unknown) {
-        const message = safeError(error, env);
-        await runs.updateOne({ _id: RUN_ID }, { $set: { lastTickAt: now, lastError: message } });
+        const message = safePaperError(error, env);
+        try {
+          if (!(error instanceof PaperLeaseLostError)) {
+            await fencedRuns.updateOne({ _id: RUN_ID }, { $set: { lastAttemptAt: now, lastError: message } });
+          }
+        } catch (writeError: unknown) {
+          if (!(writeError instanceof PaperLeaseLostError)) throw writeError;
+        }
         process.stderr.write(`${JSON.stringify({ event: "paper-error", at: now.toISOString(), message })}\n`);
       } finally {
         await releaseLease(runs, owner);
@@ -905,7 +948,7 @@ export async function runPaperTrading(env: NodeJS.ProcessEnv = process.env): Pro
 const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (isMain) {
   runPaperTrading().catch((error: unknown) => {
-    process.stderr.write(`Paper trading failed: ${safeError(error, process.env)}\n`);
+    process.stderr.write(`Paper trading failed: ${safePaperError(error, process.env)}\n`);
     process.exitCode = 1;
   });
 }
