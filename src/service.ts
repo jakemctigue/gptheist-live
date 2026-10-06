@@ -39,7 +39,7 @@ export function marketSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env): str
   const pollMs = env.MARKET_IMPORT_POLL_MS?.trim() || "5000";
   const networks = env.MARKET_IMPORT_NETWORKS?.trim() || "ethereum,solana";
   const evmBatchSize = env.MARKET_EVM_BATCH_SIZE?.trim() || "10";
-  return [
+  const args = [
     resolve(runtimeDirectory, "marketImport.js"),
     "--hours", hours,
     "--networks", networks,
@@ -47,12 +47,24 @@ export function marketSyncArgsFromEnv(env: NodeJS.ProcessEnv = process.env): str
     "--follow",
     "--poll-ms", pollMs
   ];
+  const maxBlocks = env.MARKET_EVM_MAX_BLOCKS_PER_TICK?.trim();
+  if (maxBlocks) {
+    const value = Number(maxBlocks);
+    if (!Number.isSafeInteger(value) || value < 1 || value > 1000) throw new Error("MARKET_EVM_MAX_BLOCKS_PER_TICK must be from 1 to 1000");
+    args.push("--max-evm-blocks", maxBlocks);
+  }
+  return args;
 }
 
 export function marketSyncEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = (env.MARKET_TRANSACTION_SYNC_ENABLED ?? "false").trim().toLowerCase();
   if (value !== "true" && value !== "false") throw new Error("MARKET_TRANSACTION_SYNC_ENABLED must be true or false");
-  return value === "true" && Boolean(env.ALCHEMY_API_KEY?.trim() || (env.ETHEREUM_RPC_URL?.trim() && env.SOLANA_RPC_URL?.trim()));
+  const networks = (env.MARKET_IMPORT_NETWORKS?.trim() || "ethereum,solana").split(",").map((network) => network.trim());
+  if (networks.some((network) => network !== "ethereum" && network !== "solana")) throw new Error("MARKET_IMPORT_NETWORKS must contain ethereum and/or solana");
+  return value === "true" && networks.every((network) => {
+    const name = network === "ethereum" ? "ETHEREUM_RPC_URL" : "SOLANA_RPC_URL";
+    return Boolean(env[name]?.trim() || env[`DRPC_${name}`]?.trim() || env.ALCHEMY_API_KEY?.trim());
+  });
 }
 
 function syncEnabled(env: NodeJS.ProcessEnv): boolean {
@@ -104,8 +116,8 @@ function launchMarketSync(): void {
   child.once("exit", (code) => {
     children.delete(child);
     if (shuttingDown) return;
-    process.stderr.write(`Market transaction sync exited with code ${String(code ?? 1)}; restarting from MongoDB checkpoints in 5 seconds.\n`);
-    marketRestart = setTimeout(launchMarketSync, 5_000);
+    process.stderr.write(`Market transaction sync exited with code ${String(code ?? 1)}; restarting from MongoDB checkpoints in 60 seconds.\n`);
+    marketRestart = setTimeout(launchMarketSync, 60_000);
   });
 }
 

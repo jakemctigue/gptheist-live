@@ -14,7 +14,9 @@ const DEFAULT_ETHEREUM_CONFIRMATIONS = 12;
 const DEFAULT_EVM_BATCH_SIZE = 50;
 const DEFAULT_SOLANA_PAGE_SIZE = 1_000;
 const SOLANA_HISTORY_PAGE_STRIDE = 10;
-const MAX_RETRIES = 6;
+const MAX_RETRIES = 3;
+const MAX_RPC_BATCH_SIZE = 20;
+export const SOLANA_MAINNET_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 const RETENTION_SECONDS = 93 * 24 * 60 * 60;
 
 export const EVM_MARKET_EVENTS = {
@@ -196,23 +198,38 @@ export function parseMarketImportArgs(args: string[]): MarketImportOptions {
   return result;
 }
 
-function apiKey(): string {
-  const value = process.env.ALCHEMY_API_KEY?.trim();
+function apiKey(env: NodeJS.ProcessEnv): string {
+  const value = env.ALCHEMY_API_KEY?.trim();
   if (!value) throw new Error("Missing ALCHEMY_API_KEY");
   if (!/^[A-Za-z0-9_-]{10,200}$/.test(value)) throw new Error("ALCHEMY_API_KEY has an invalid format");
   return value;
 }
 
-function endpoint(network: MarketNetwork): string {
-  const explicit = network === "ethereum" ? process.env.ETHEREUM_RPC_URL?.trim() : process.env.SOLANA_RPC_URL?.trim();
+export function marketRpcEndpoint(network: MarketNetwork, env: NodeJS.ProcessEnv = process.env): string {
+  const name = network === "ethereum" ? "ETHEREUM_RPC_URL" : "SOLANA_RPC_URL";
+  const explicit = env[name]?.trim() || env[`DRPC_${name}`]?.trim();
   if (explicit) {
-    if (!/^https:\/\//i.test(explicit)) throw new Error(`${network.toUpperCase()}_RPC_URL must use HTTPS`);
+    let url: URL;
+    try { url = new URL(explicit); } catch { throw new Error(`${name} must be a valid HTTPS endpoint`); }
+    if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error(`${name} must use HTTPS without embedded credentials or a fragment`);
+    if (url.hostname === "lb.drpc.live" && url.pathname.split("/")[1] !== network) {
+      throw new Error(`${name} dRPC endpoint targets the wrong network`);
+    }
     return explicit;
   }
-  const key = apiKey();
+  const key = apiKey(env);
   return network === "ethereum"
     ? `https://eth-mainnet.g.alchemy.com/v2/${key}`
     : `https://solana-mainnet.g.alchemy.com/v2/${key}`;
+}
+
+export async function verifyMarketRpcNetwork(network: MarketNetwork, rpc: Pick<JsonRpcClient, "call">): Promise<void> {
+  if (network === "ethereum") {
+    const chainId = hexNumber(await rpc.call("eth_chainId"), "eth_chainId");
+    if (chainId !== 1) throw new Error(`Ethereum endpoint returned chain id ${chainId}; expected Ethereum mainnet (1)`);
+  } else if (await rpc.call("getGenesisHash") !== SOLANA_MAINNET_GENESIS_HASH) {
+    throw new Error("Solana endpoint must target mainnet-beta");
+  }
 }
 
 export function configuredSolanaMarkets(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -229,74 +246,133 @@ export function configuredSolanaMarkets(env: NodeJS.ProcessEnv = process.env): R
   return result;
 }
 
-class JsonRpcClient {
+class MarketRpcError extends Error {
+  constructor(message: string, readonly retryable: boolean, readonly retryAfterMs = 0) { super(message); }
+}
+
+export class JsonRpcClient {
   #nextId = 1;
-  constructor(readonly url: string, readonly label: string) {}
+  #nextRequestAt = 0;
+  #queue: Promise<unknown> = Promise.resolve();
+  constructor(
+    readonly url: string,
+    readonly label: string,
+    readonly transport: typeof fetch = fetch,
+    readonly sleep: (milliseconds: number) => Promise<void> = delay,
+    readonly now: () => number = Date.now
+  ) {}
+
+  #redact(message: string): string {
+    return message.split(this.url).join("<rpc>").replace(/https?:\/\/[^\s"'<>]+/gi, "<rpc>");
+  }
 
   async post(body: JsonObject | JsonObject[]): Promise<unknown> {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+    const operation = this.#queue.then(async () => {
+      const waitMs = this.#nextRequestAt - this.now();
+      if (waitMs > 0) await this.sleep(waitMs);
+      // Pace subrequests as well as HTTP calls: batching does not make RPC methods free.
+      this.#nextRequestAt = this.now() + (Array.isArray(body) ? body.length : 1) * 100;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 45_000);
+      const timer = setTimeout(() => controller.abort(), 20_000);
       try {
-        const response = await fetch(this.url, {
+        const response = await this.transport(this.url, {
           method: "POST",
           headers: { "content-type": "application/json", "user-agent": "gptheist/1.2 market-import" },
           body: JSON.stringify(body),
           signal: controller.signal
         });
+        if (!response.ok) {
+          const retryAfter = Number(response.headers.get("retry-after"));
+          const retryAfterMs = Number.isFinite(retryAfter) ? Math.min(30_000, Math.max(0, retryAfter * 1_000)) : 0;
+          const retryable = response.status === 429 || response.status >= 500;
+          if (retryable) this.#nextRequestAt = Math.max(this.#nextRequestAt, this.now() + Math.max(500, retryAfterMs));
+          const payload = !retryable ? await response.json().catch(() => null) as unknown : null;
+          const detail = isObject(payload) && isObject(payload.error) && typeof payload.error.message === "string"
+            ? `: ${this.#redact(payload.error.message).slice(0, 200)}` : "";
+          throw new MarketRpcError(`${this.label} HTTP ${response.status}${detail}`, retryable, retryAfterMs);
+        }
         const payload = await response.json() as unknown;
-        if (response.status === 429 || response.status >= 500) throw new Error(`retryable HTTP ${response.status}`);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return payload;
-      } catch (error: unknown) {
-        lastError = error;
-        if (attempt === MAX_RETRIES - 1) break;
-        await delay(Math.min(10_000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
       } finally {
         clearTimeout(timer);
       }
-    }
-    const message = lastError instanceof Error ? lastError.message : "unknown RPC failure";
-    throw new Error(`${this.label} RPC failed after retries: ${message.replace(this.url, "<rpc>")}`);
+    });
+    this.#queue = operation.catch(() => undefined);
+    return operation;
   }
 
-  async call(method: string, params: unknown[] = []): Promise<unknown> {
+  async call(method: string, params: unknown[] = [], maxAttempts = MAX_RETRIES): Promise<unknown> {
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > MAX_RETRIES) throw new Error("Invalid RPC attempt budget");
     const id = this.#nextId++;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
-      const payload = await this.post({ jsonrpc: "2.0", id, method, params });
-      if (!isObject(payload)) throw new Error(`${this.label} returned an invalid response for ${method}`);
-      const envelope = payload as unknown as RpcEnvelope;
-      if (!envelope.error) return envelope.result;
-      const message = envelope.error.message ?? String(envelope.error.code ?? "error");
-      if (!retryableRpcError(message) || attempt === MAX_RETRIES - 1) throw new Error(`${this.label} ${method}: ${message}`);
-      await delay(Math.min(10_000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        const payload = await this.post({ jsonrpc: "2.0", id, method, params });
+        if (!isObject(payload) || payload.id !== id || payload.jsonrpc !== "2.0" || (!payload.error && !("result" in payload))) {
+          throw new MarketRpcError(`${this.label} returned an invalid response for ${method}`, false);
+        }
+        const envelope = payload as unknown as RpcEnvelope;
+        if (!envelope.error) return envelope.result;
+        const message = envelope.error.message ?? String(envelope.error.code ?? "error");
+        throw new MarketRpcError(`${this.label} ${method}: ${this.#redact(message)}`, retryableRpcError(message));
+      } catch (error: unknown) {
+        const failure = error instanceof MarketRpcError ? error : new MarketRpcError(`${this.label} transport failure`, true);
+        if (!failure.retryable || attempt === maxAttempts - 1) throw failure;
+        await this.sleep(Math.max(failure.retryAfterMs, 500 * (2 ** attempt)));
+      }
     }
     throw new Error(`${this.label} ${method}: retry budget exhausted`);
   }
 
   async batch(requests: { method: string; params: unknown[] }[]): Promise<unknown[]> {
     if (requests.length === 0) return [];
-    const bodies = requests.map((request) => ({ jsonrpc: "2.0", id: this.#nextId++, ...request }));
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
-      const payload = await this.post(bodies);
-      if (!Array.isArray(payload)) throw new Error(`${this.label} returned an invalid batch response`);
-      const byId = new Map<number, RpcEnvelope>();
-      for (const item of payload) if (isObject(item) && typeof item.id === "number") byId.set(item.id, item as unknown as RpcEnvelope);
-      const ordered = bodies.map((body) => {
-        const response = byId.get(body.id);
-        if (!response) throw new Error(`${this.label} omitted batch response ${body.id}`);
-        return { body, response };
-      });
-      const retryable = ordered.some(({ response }) => response.error && retryableRpcError(response.error.message ?? String(response.error.code ?? "error")));
-      if (retryable && attempt < MAX_RETRIES - 1) {
-        await delay(Math.min(10_000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
-        continue;
+    if (requests.length > MAX_RPC_BATCH_SIZE) {
+      const results: unknown[] = [];
+      for (let offset = 0; offset < requests.length; offset += MAX_RPC_BATCH_SIZE) {
+        results.push(...await this.batch(requests.slice(offset, offset + MAX_RPC_BATCH_SIZE)));
       }
-      return ordered.map(({ body, response }) => {
-        if (response.error) throw new Error(`${this.label} ${body.method}: ${response.error.message ?? "RPC error"}`);
-        return response.result;
-      });
+      return results;
+    }
+    const bodies = requests.map((request) => ({ jsonrpc: "2.0", id: this.#nextId++, ...request }));
+    let pending = bodies;
+    const completed = new Map<number, unknown>();
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+      try {
+        const payload = await this.post(pending);
+        if (!Array.isArray(payload)) throw new MarketRpcError(`${this.label} returned an invalid batch response`, false);
+        const byId = new Map<number, RpcEnvelope>();
+        for (const item of payload) {
+          if (!isObject(item) || item.jsonrpc !== "2.0" || typeof item.id !== "number" || byId.has(item.id) || (!item.error && !("result" in item))) {
+            throw new MarketRpcError(`${this.label} returned an invalid batch envelope`, false);
+          }
+          byId.set(item.id, item as unknown as RpcEnvelope);
+        }
+        const remaining: typeof bodies = [];
+        for (const body of pending) {
+          const response = byId.get(body.id);
+          if (!response) throw new MarketRpcError(`${this.label} omitted batch response ${body.id}`, false);
+          if (!response.error) completed.set(body.id, response.result);
+          else {
+            const message = response.error.message ?? "RPC error";
+            if (!retryableRpcError(message)) throw new MarketRpcError(`${this.label} ${body.method}: ${this.#redact(message)}`, false);
+            remaining.push(body);
+          }
+        }
+        pending = remaining;
+        if (pending.length === 0) return bodies.map((body) => completed.get(body.id));
+        throw new MarketRpcError(`${this.label} batch rate limit`, true);
+      } catch (error: unknown) {
+        const failure = error instanceof MarketRpcError ? error : new MarketRpcError(`${this.label} transport failure`, true);
+        // Some providers serve historical receipts singly but fail JSON-RPC batches.
+        // Reuse the remaining budget per item instead of multiplying retry loops.
+        if (/HTTP 500$/.test(failure.message) && attempt < MAX_RETRIES - 1) {
+          for (const body of pending) {
+            completed.set(body.id, await this.call(body.method, body.params, MAX_RETRIES - attempt - 1));
+          }
+          return bodies.map((body) => completed.get(body.id));
+        }
+        if (!failure.retryable || attempt === MAX_RETRIES - 1) throw failure;
+        await this.sleep(Math.max(failure.retryAfterMs, 500 * (2 ** attempt)));
+      }
     }
     throw new Error(`${this.label} batch: retry budget exhausted`);
   }
@@ -345,7 +421,7 @@ function evmLog(value: unknown): value is EvmLog {
     typeof value.data === "string" && Array.isArray(value.topics) && value.topics.every((topic) => typeof topic === "string");
 }
 
-async function evmLogs(rpc: JsonRpcClient, fromBlock: number, toBlock: number, depth = 0): Promise<EvmLog[]> {
+export async function evmLogs(rpc: JsonRpcClient, fromBlock: number, toBlock: number, depth = 0): Promise<EvmLog[]> {
   try {
     const result = await rpc.call("eth_getLogs", [{
       fromBlock: `0x${fromBlock.toString(16)}`,
@@ -357,6 +433,28 @@ async function evmLogs(rpc: JsonRpcClient, fromBlock: number, toBlock: number, d
     return result.filter(evmLog).filter((log) => !log.removed);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message.toLowerCase() : "";
+    // Some load balancers reject historical numeric ranges while serving the
+    // same canonical logs through the standard EIP-234 blockHash filter.
+    if (/unknown state/.test(message) && toBlock >= fromBlock && toBlock - fromBlock < 1_000) {
+      const logs: EvmLog[] = [];
+      for (let blockNumber = fromBlock; blockNumber <= toBlock; blockNumber += 1) {
+        const block = await evmBlock(rpc, blockNumber, false);
+        if (hexNumber(block.number, "block.number") !== blockNumber || !/^0x[0-9a-fA-F]{64}$/.test(block.hash)) {
+          throw new Error("Invalid Ethereum header during blockHash log recovery");
+        }
+        const result = await rpc.call("eth_getLogs", [{
+          blockHash: block.hash,
+          address: Object.values(EVM_MARKET_POOLS),
+          topics: [Object.keys(EVM_MARKET_TOPICS)]
+        }]);
+        if (!Array.isArray(result) || result.some((log) => !evmLog(log) ||
+          log.blockHash.toLowerCase() !== block.hash.toLowerCase() || hexNumber(log.blockNumber, "log.blockNumber") !== blockNumber)) {
+          throw new Error("Invalid Ethereum blockHash logs response");
+        }
+        logs.push(...result.filter(evmLog).filter((log) => !log.removed));
+      }
+      return logs;
+    }
     const canSplit = /block range|response size|too many results|more than \d+|query returned more|limit exceeded/.test(message);
     if (!canSplit || fromBlock >= toBlock || depth >= 24) throw error;
     const middle = Math.floor((fromBlock + toBlock) / 2);
@@ -366,7 +464,7 @@ async function evmLogs(rpc: JsonRpcClient, fromBlock: number, toBlock: number, d
 
 async function evmBlock(rpc: JsonRpcClient, blockNumber: number, fullTransactions: boolean): Promise<EvmBlock> {
   const value = await rpc.call("eth_getBlockByNumber", [`0x${blockNumber.toString(16)}`, fullTransactions]);
-  if (!isObject(value) || !Array.isArray(value.transactions) || typeof value.hash !== "string" || typeof value.timestamp !== "string") {
+  if (!isObject(value) || value.number !== `0x${blockNumber.toString(16)}` || !Array.isArray(value.transactions) || typeof value.hash !== "string" || typeof value.timestamp !== "string") {
     throw new Error(`Invalid Ethereum block ${blockNumber}`);
   }
   return value as unknown as EvmBlock;
@@ -401,7 +499,7 @@ async function ensureIndexes(transactions: Collection<MarketTransaction>): Promi
   ]);
 }
 
-async function storeEvmRange(
+export async function storeEvmRange(
   rpc: JsonRpcClient,
   transactions: Collection<MarketTransaction>,
   fromBlock: number,
@@ -421,6 +519,9 @@ async function storeEvmRange(
     const block = await evmBlock(rpc, blockNumber, true);
     const txs = transactionByHash(block);
     const blockLogs = logsByBlock.get(blockNumber) ?? [];
+    if (blockLogs.some((log) => log.blockHash.toLowerCase() !== block.hash.toLowerCase())) {
+      throw new Error(`Ethereum block ${blockNumber} changed while hydrating logs`);
+    }
     const grouped = new Map<string, EvmLog[]>();
     for (const log of blockLogs) {
       const hash = log.transactionHash.toLowerCase();
@@ -438,7 +539,12 @@ async function storeEvmRange(
       const transaction = txs.get(hash);
       const receipt = receipts[index];
       const matchedLogs = grouped.get(hash) ?? [];
-      if (!transaction || !isObject(receipt)) continue;
+      if (!transaction || !isObject(receipt)) throw new Error(`Missing Ethereum transaction or receipt ${hash}`);
+      if (typeof receipt.blockHash !== "string" || receipt.blockHash.toLowerCase() !== block.hash.toLowerCase() ||
+          receipt.blockNumber !== `0x${blockNumber.toString(16)}` ||
+          typeof receipt.transactionHash !== "string" || receipt.transactionHash.toLowerCase() !== hash) {
+        throw new Error(`Inconsistent Ethereum receipt ${hash}`);
+      }
       const timestamp = new Date(hexNumber(block.timestamp, "block.timestamp") * 1_000);
       const protocols = [...new Set(matchedLogs.map((log) => EVM_MARKET_TOPICS[(log.topics[0] ?? "").toLowerCase()] ?? "unknown-swap"))];
       const document: MarketTransaction = {
@@ -483,6 +589,17 @@ async function storeEvmRange(
   return storedByBlock.reduce((total, count) => total + count, 0);
 }
 
+export async function ethereumResumeBlock(
+  checkpoint: Pick<EvmCheckpoint, "nextBlock"> | null,
+  findStartByTime: () => Promise<number>
+): Promise<number> {
+  if (checkpoint) {
+    if (!Number.isSafeInteger(checkpoint.nextBlock) || checkpoint.nextBlock < 1) throw new Error("Invalid Ethereum checkpoint nextBlock");
+    return checkpoint.nextBlock;
+  }
+  return findStartByTime();
+}
+
 async function importEthereum(
   rpc: JsonRpcClient,
   transactions: Collection<MarketTransaction>,
@@ -491,15 +608,12 @@ async function importEthereum(
   since: Date,
   followOnly = false
 ): Promise<{ nextBlock: number; stored: number }> {
-  const chainId = hexNumber(await rpc.call("eth_chainId"), "eth_chainId");
-  if (chainId !== 1) throw new Error(`Ethereum endpoint returned chain id ${chainId}`);
   const head = hexNumber(await rpc.call("eth_blockNumber"), "eth_blockNumber");
   const endBlock = Math.max(1, head - options.ethereumConfirmations);
   const checkpointId = "market:ethereum:eth-usd:v2";
   const checkpoint = await checkpoints.findOne({ _id: checkpointId });
   const effectiveSince = checkpoint?.since ?? since;
-  const startByTime = await firstEvmBlockAtOrAfter(rpc, endBlock, Math.floor(effectiveSince.getTime() / 1_000));
-  let nextBlock = Math.max(startByTime, checkpoint?.nextBlock ?? startByTime);
+  let nextBlock = await ethereumResumeBlock(checkpoint, () => firstEvmBlockAtOrAfter(rpc, endBlock, Math.floor(effectiveSince.getTime() / 1_000)));
   let stored = checkpoint?.storedTransactions ?? 0;
   if (followOnly && nextBlock > endBlock) return { nextBlock, stored };
   const hardEnd = options.maxEvmBlocks ? Math.min(endBlock, nextBlock + options.maxEvmBlocks - 1) : endBlock;
@@ -705,8 +819,9 @@ function helpText(): string {
     "  --max-solana-pages <n>         Bounded pilot pages per program",
     "",
     "Environment:",
-    "  ALCHEMY_API_KEY (required unless both RPC URLs are configured)",
-    "  ETHEREUM_RPC_URL / SOLANA_RPC_URL (optional overrides)",
+    "  ETHEREUM_RPC_URL / SOLANA_RPC_URL (explicit overrides)",
+    "  DRPC_ETHEREUM_RPC_URL / DRPC_SOLANA_RPC_URL (dRPC overrides)",
+    "  ALCHEMY_API_KEY (legacy fallback for networks without an explicit URL)",
     "  MARKET_SOLANA_MARKETS=name:address,... (optional pool override)",
     "  MONGODB_URI and GPTHEIST_MONGODB_DB"
   ].join("\n");
@@ -724,25 +839,31 @@ export async function runMarketImport(args: string[]): Promise<void> {
     throw error;
   }
   const since = new Date(Date.now() - options.hours * 60 * 60 * 1_000);
-  const ethereumRpc = options.networks.includes("ethereum") ? new JsonRpcClient(endpoint("ethereum"), "Ethereum") : null;
-  const solanaRpc = options.networks.includes("solana") ? new JsonRpcClient(endpoint("solana"), "Solana") : null;
+  const ethereumRpc = options.networks.includes("ethereum") ? new JsonRpcClient(marketRpcEndpoint("ethereum"), "Ethereum") : null;
+  const solanaRpc = options.networks.includes("solana") ? new JsonRpcClient(marketRpcEndpoint("solana"), "Solana") : null;
   const markets = configuredSolanaMarkets();
   const plan: JsonObject = { event: "market-import-plan", since: since.toISOString(), networks: options.networks };
   if (ethereumRpc) {
-    const chainId = hexNumber(await ethereumRpc.call("eth_chainId"), "eth_chainId");
+    await verifyMarketRpcNetwork("ethereum", ethereumRpc);
     const head = hexNumber(await ethereumRpc.call("eth_blockNumber"), "eth_blockNumber");
     const endBlock = Math.max(1, head - options.ethereumConfirmations);
-    const startBlock = await firstEvmBlockAtOrAfter(ethereumRpc, endBlock, Math.floor(since.getTime() / 1_000));
-    plan.ethereum = { chainId, startBlock, endBlock, blocks: endBlock - startBlock + 1, pools: Object.keys(EVM_MARKET_POOLS).length, eventTopics: Object.keys(EVM_MARKET_TOPICS).length };
+    const ethereumPlan: JsonObject = { chainId: 1, endBlock, pools: Object.keys(EVM_MARKET_POOLS).length, eventTopics: Object.keys(EVM_MARKET_TOPICS).length };
+    if (options.plan) {
+      const startBlock = await firstEvmBlockAtOrAfter(ethereumRpc, endBlock, Math.floor(since.getTime() / 1_000));
+      Object.assign(ethereumPlan, { startBlock, blocks: endBlock - startBlock + 1 });
+    }
+    plan.ethereum = ethereumPlan;
   }
   if (solanaRpc) {
+    await verifyMarketRpcNetwork("solana", solanaRpc);
     const slot = await solanaRpc.call("getSlot", [{ commitment: "finalized" }]);
     plan.solana = { slot, markets: Object.keys(markets).length };
   }
   process.stdout.write(`${JSON.stringify(plan)}\n`);
   if (options.plan) return;
 
-  const mongoUri = process.env.MONGODB_URI?.trim() || "mongodb://127.0.0.1:27017";
+  const mongoUri = process.env.MONGODB_URI?.trim();
+  if (!mongoUri) throw new Error("MONGODB_URI is required for hosted market ingestion");
   const databaseName = process.env.GPTHEIST_MONGODB_DB?.trim() || "gptheist";
   const client = new MongoClient(mongoUri, { appName: "gptheist-market-import" });
   let interrupted = false;

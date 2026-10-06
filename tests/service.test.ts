@@ -28,6 +28,20 @@ test("market sync defaults to a 48-hour Ethereum and Solana import followed by p
   assert.throws(() => marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "yes" }), /must be true or false/);
 });
 
+test("market sync recognizes stored dRPC endpoints for only the configured networks", () => {
+  assert.equal(marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "true", DRPC_ETHEREUM_RPC_URL: "configured", DRPC_SOLANA_RPC_URL: "configured" }), true);
+  assert.equal(marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "true", MARKET_IMPORT_NETWORKS: "ethereum", DRPC_ETHEREUM_RPC_URL: "configured" }), true);
+  assert.equal(marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "true", MARKET_IMPORT_NETWORKS: "solana", DRPC_ETHEREUM_RPC_URL: "configured" }), false);
+  assert.throws(() => marketSyncEnabled({ MARKET_TRANSACTION_SYNC_ENABLED: "true", MARKET_IMPORT_NETWORKS: "robinhood" }), /ethereum and\/or solana/);
+});
+
+test("market sync can bound checkpoint catch-up per tick", () => {
+  const args = marketSyncArgsFromEnv({ MARKET_EVM_MAX_BLOCKS_PER_TICK: "100", MARKET_IMPORT_POLL_MS: "60000" });
+  assert.deepEqual(args.slice(-4), ["--poll-ms", "60000", "--max-evm-blocks", "100"]);
+  assert.throws(() => marketSyncArgsFromEnv({ MARKET_EVM_MAX_BLOCKS_PER_TICK: "0" }), /1 to 1000/);
+  assert.throws(() => marketSyncArgsFromEnv({ MARKET_EVM_MAX_BLOCKS_PER_TICK: "100000" }), /1 to 1000/);
+});
+
 test("production sync accepts explicit operational overrides without putting secrets in arguments", () => {
   const args = transactionSyncArgsFromEnv({
     ROBINHOOD_POLL_MS: "750",
